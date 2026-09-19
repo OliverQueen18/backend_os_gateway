@@ -1,0 +1,40 @@
+server:
+  port: ${SERVER_PORT:8087}
+spring:
+  application:
+    name: notification-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/os_gateway}
+    username: ${DB_USER:osgateway}
+    password: ${DB_PASSWORD:osgateway}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  rabbitmq:
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USER:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+osgateway:
+  jwt:
+    secret: ${JWT_SECRET:osgateway-dev-secret-key-change-me-32chars-min}
+  firebase:
+    # Prefer inline JSON secret in production (Railway / Docker secrets).
+    credentials-json: ${FIREBASE_CREDENTIALS_JSON:}
+    # Or path to a mounted service-account file.
+    credentials-path: ${FIREBASE_CREDENTIALS_PATH:}
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html

@@ -1,0 +1,245 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: osg-postgres
+    environment:
+      POSTGRES_DB: os_gateway
+      POSTGRES_USER: osgateway
+      POSTGRES_PASSWORD: osgateway
+    command: ["postgres", "-c", "max_connections=200"]
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./sql/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U osgateway -d os_gateway"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [osg-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: osg-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    networks: [osg-net]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: osg-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      # Avoid blocking publishers when the host is tight on RAM (local stack).
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit vm_memory_high_watermark float 0.85"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    networks: [osg-net]
+
+  auth-service:
+    build: ./auth-service
+    environment: &svc-env
+      DB_URL: jdbc:postgresql://postgres:5432/os_gateway
+      DB_USER: osgateway
+      DB_PASSWORD: osgateway
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      JWT_SECRET: osgateway-dev-secret-key-change-me-32chars-min
+      # Keep total JDBC clients under Postgres max_connections (many microservices).
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "5"
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
+    ports: ["8081:8081"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  user-service:
+    build: ./user-service
+    environment:
+      <<: *svc-env
+      UPLOADS_DIR: /tmp/osgateway-uploads
+    ports: ["8082:8082"]
+    volumes:
+      - uploads_data:/tmp/osgateway-uploads
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  gateway-service:
+    build: ./gateway-service
+    environment: *svc-env
+    ports: ["8083:8083"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [osg-net]
+
+  ussd-service:
+    build: ./ussd-service
+    environment:
+      <<: *svc-env
+      OPERATOR_LOGO_STORAGE: /app/data/operator-logos
+    ports: ["8084:8084"]
+    volumes:
+      - ussd-logos:/app/data/operator-logos
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [osg-net]
+
+  sms-service:
+    build: ./sms-service
+    environment: *svc-env
+    ports: ["8085:8085"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  transaction-service:
+    build: ./transaction-service
+    environment: *svc-env
+    ports: ["8086:8086"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  notification-service:
+    build: ./notification-service
+    environment:
+      <<: *svc-env
+      # Prefer file mount (local). Or set FIREBASE_CREDENTIALS_JSON in .env (one-line JSON).
+      FIREBASE_CREDENTIALS_JSON: ${FIREBASE_CREDENTIALS_JSON:-}
+      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-/secrets/nga-siguida-firebase-adminsdk-5qq9z-b275a57f96.json}
+    volumes:
+      # Place the Firebase service-account JSON at ./secrets/firebase-adminsdk.json
+      - ./secrets:/secrets:ro
+    ports: ["8087:8087"]
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  audit-service:
+    build: ./audit-service
+    environment: *svc-env
+    ports: ["8088:8088"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [osg-net]
+
+  reporting-service:
+    build: ./reporting-service
+    environment: *svc-env
+    ports: ["8089:8089"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [osg-net]
+
+  scheduler-service:
+    build: ./scheduler-service
+    environment:
+      <<: *svc-env
+      GATEWAY_SERVICE_URL: http://gateway-service:8083
+      TRANSACTION_SERVICE_URL: http://transaction-service:8086
+      USSD_SERVICE_URL: http://ussd-service:8084
+    ports: ["8090:8090"]
+    depends_on:
+      - gateway-service
+      - transaction-service
+      - rabbitmq
+    networks: [osg-net]
+
+  monitoring-service:
+    build: ./monitoring-service
+    environment: *svc-env
+    ports: ["8091:8091"]
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [osg-net]
+
+  api-gateway:
+    build: ./api-gateway
+    environment:
+      REDIS_HOST: redis
+      JWT_SECRET: osgateway-dev-secret-key-change-me-32chars-min
+      # Dev: avoid 429 during console polling + login attempts
+      RATE_LIMIT_RPM: 2000
+      RATE_LIMIT_ENABLED: "false"
+      AUTH_SERVICE_URL: http://auth-service:8081
+      USER_SERVICE_URL: http://user-service:8082
+      GATEWAY_SERVICE_URL: http://gateway-service:8083
+      USSD_SERVICE_URL: http://ussd-service:8084
+      SMS_SERVICE_URL: http://sms-service:8085
+      TRANSACTION_SERVICE_URL: http://transaction-service:8086
+      NOTIFICATION_SERVICE_URL: http://notification-service:8087
+      AUDIT_SERVICE_URL: http://audit-service:8088
+      REPORTING_SERVICE_URL: http://reporting-service:8089
+      SCHEDULER_SERVICE_URL: http://scheduler-service:8090
+      MONITORING_SERVICE_URL: http://monitoring-service:8091
+    # 18080 évite le conflit avec Apache local (httpd) déjà sur 8080
+    ports: ["18080:8080"]
+    depends_on:
+      - auth-service
+      - user-service
+      - gateway-service
+      - redis
+    networks: [osg-net]
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: osg-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api-gateway
+    networks: [osg-net]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: osg-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    networks: [osg-net]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: osg-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    depends_on:
+      - prometheus
+    networks: [osg-net]
+
+volumes:
+  pgdata:
+  uploads_data:
+  ussd-logos:
+
+networks:
+  osg-net:
+    driver: bridge

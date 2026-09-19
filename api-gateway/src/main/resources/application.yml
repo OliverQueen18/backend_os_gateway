@@ -1,0 +1,85 @@
+server:
+  port: ${SERVER_PORT:8080}
+
+spring:
+  application:
+    name: api-gateway
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  cloud:
+    gateway:
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOriginPatterns: "*"
+            allowedMethods: "*"
+            allowedHeaders: "*"
+            allowCredentials: true
+      default-filters:
+        - DedupeResponseHeader=Access-Control-Allow-Origin Access-Control-Allow-Credentials, RETAIN_UNIQUE
+      routes:
+        - id: auth-service
+          uri: ${AUTH_SERVICE_URL:http://localhost:8081}
+          predicates:
+            - Path=/api/v1/auth/**
+        - id: user-service
+          uri: ${USER_SERVICE_URL:http://localhost:8082}
+          predicates:
+            - Path=/api/v1/users/**,/api/v1/roles/**,/api/v1/permissions/**,/api/v1/settings/**,/api/v1/distributors/**,/api/v1/operation-types/**
+        - id: gateway-service
+          uri: ${GATEWAY_SERVICE_URL:http://localhost:8083}
+          predicates:
+            - Path=/api/v1/gateways/**,/ws/gateways/**
+        - id: ussd-service
+          uri: ${USSD_SERVICE_URL:http://localhost:8084}
+          predicates:
+            - Path=/api/v1/ussd/**
+        - id: sms-service
+          uri: ${SMS_SERVICE_URL:http://localhost:8085}
+          predicates:
+            - Path=/api/v1/sms/**
+        - id: transaction-service
+          uri: ${TRANSACTION_SERVICE_URL:http://localhost:8086}
+          predicates:
+            - Path=/api/v1/transactions/**
+        - id: notification-service
+          uri: ${NOTIFICATION_SERVICE_URL:http://localhost:8087}
+          predicates:
+            - Path=/api/v1/notifications/**,/ws/notifications/**
+        - id: audit-service
+          uri: ${AUDIT_SERVICE_URL:http://localhost:8088}
+          predicates:
+            - Path=/api/v1/audit/**
+        - id: reporting-service
+          uri: ${REPORTING_SERVICE_URL:http://localhost:8089}
+          predicates:
+            - Path=/api/v1/reports/**
+        - id: scheduler-service
+          uri: ${SCHEDULER_SERVICE_URL:http://localhost:8090}
+          predicates:
+            - Path=/api/v1/scheduler/**
+        - id: monitoring-service
+          uri: ${MONITORING_SERVICE_URL:http://localhost:8091}
+          predicates:
+            - Path=/api/v1/monitoring/**
+
+osgateway:
+  jwt:
+    secret: ${JWT_SECRET:osgateway-dev-secret-key-change-me-32chars-min}
+  rate-limit:
+    enabled: ${RATE_LIMIT_ENABLED:true}
+    requests-per-minute: ${RATE_LIMIT_RPM:600}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+
+springdoc:
+  api-docs:
+    path: /v3/api-docs
+  swagger-ui:
+    path: /swagger-ui.html

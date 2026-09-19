@@ -1,0 +1,199 @@
+# Stack légère pour tester TX / gateway (faible RAM).
+# Usage :
+#   docker compose -f docker-compose.light.yml up -d
+# Stop :
+#   docker compose -f docker-compose.light.yml down
+#
+# API : http://localhost:18080
+# Pas de Prometheus / Grafana / Nginx / audit / reporting / monitoring / scheduler
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: osg-postgres
+    environment:
+      POSTGRES_DB: os_gateway
+      POSTGRES_USER: osgateway
+      POSTGRES_PASSWORD: osgateway
+    command:
+      - postgres
+      - -c
+      - max_connections=80
+      - -c
+      - shared_buffers=64MB
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./sql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./sql/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U osgateway -d os_gateway"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    mem_limit: 384m
+    networks: [osg-net]
+
+  redis:
+    image: redis:7-alpine
+    container_name: osg-redis
+    command: ["redis-server", "--maxmemory", "64mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 15s
+      timeout: 3s
+      retries: 10
+    mem_limit: 96m
+    networks: [osg-net]
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: osg-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit vm_memory_high_watermark float 0.4"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 20s
+      timeout: 10s
+      retries: 10
+      start_period: 40s
+    mem_limit: 384m
+    networks: [osg-net]
+
+  auth-service:
+    build: ./auth-service
+    environment: &svc-env
+      DB_URL: jdbc:postgresql://postgres:5432/os_gateway
+      DB_USER: osgateway
+      DB_PASSWORD: osgateway
+      REDIS_HOST: redis
+      RABBITMQ_HOST: rabbitmq
+      JWT_SECRET: osgateway-dev-secret-key-change-me-32chars-min
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "3"
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -Xms64m -Xmx256m"
+    ports: ["8081:8081"]
+    mem_limit: 384m
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  user-service:
+    build: ./user-service
+    environment:
+      <<: *svc-env
+      UPLOADS_DIR: /tmp/osgateway-uploads
+    ports: ["8082:8082"]
+    volumes:
+      - uploads_data:/tmp/osgateway-uploads
+    mem_limit: 384m
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  gateway-service:
+    build: ./gateway-service
+    environment: *svc-env
+    ports: ["8083:8083"]
+    mem_limit: 384m
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [osg-net]
+
+  ussd-service:
+    build: ./ussd-service
+    environment:
+      <<: *svc-env
+      OPERATOR_LOGO_STORAGE: /app/data/operator-logos
+    ports: ["8084:8084"]
+    volumes:
+      - ussd-logos:/app/data/operator-logos
+    mem_limit: 384m
+    depends_on:
+      postgres: { condition: service_healthy }
+    networks: [osg-net]
+
+  sms-service:
+    build: ./sms-service
+    environment: *svc-env
+    ports: ["8085:8085"]
+    mem_limit: 320m
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  transaction-service:
+    build: ./transaction-service
+    environment: *svc-env
+    ports: ["8086:8086"]
+    mem_limit: 384m
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  notification-service:
+    build: ./notification-service
+    environment:
+      <<: *svc-env
+      FIREBASE_CREDENTIALS_JSON: ${FIREBASE_CREDENTIALS_JSON:-}
+      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-/secrets/nga-siguida-firebase-adminsdk-5qq9z-b275a57f96.json}
+    volumes:
+      - ./secrets:/secrets:ro
+    ports: ["8087:8087"]
+    mem_limit: 320m
+    depends_on:
+      postgres: { condition: service_healthy }
+      rabbitmq: { condition: service_healthy }
+    networks: [osg-net]
+
+  api-gateway:
+    build: ./api-gateway
+    environment:
+      REDIS_HOST: redis
+      JWT_SECRET: osgateway-dev-secret-key-change-me-32chars-min
+      RATE_LIMIT_RPM: 2000
+      RATE_LIMIT_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: "-XX:MaxRAMPercentage=70 -Xms64m -Xmx256m"
+      AUTH_SERVICE_URL: http://auth-service:8081
+      USER_SERVICE_URL: http://user-service:8082
+      GATEWAY_SERVICE_URL: http://gateway-service:8083
+      USSD_SERVICE_URL: http://ussd-service:8084
+      SMS_SERVICE_URL: http://sms-service:8085
+      TRANSACTION_SERVICE_URL: http://transaction-service:8086
+      NOTIFICATION_SERVICE_URL: http://notification-service:8087
+      # stubs pour routes non démarrées
+      AUDIT_SERVICE_URL: http://transaction-service:8086
+      REPORTING_SERVICE_URL: http://transaction-service:8086
+      SCHEDULER_SERVICE_URL: http://gateway-service:8083
+      MONITORING_SERVICE_URL: http://gateway-service:8083
+    ports: ["18080:8080"]
+    mem_limit: 384m
+    depends_on:
+      - auth-service
+      - user-service
+      - gateway-service
+      - transaction-service
+      - redis
+    networks: [osg-net]
+
+volumes:
+  pgdata:
+  uploads_data:
+  ussd-logos:
+
+networks:
+  osg-net:
+    driver: bridge
