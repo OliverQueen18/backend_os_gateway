@@ -1,0 +1,26 @@
+# Template systemd — un service par JAR
+# Exemple pour api-gateway :
+#   sudo cp osg@.service /etc/systemd/system/osg@.service
+#   sudo systemctl enable --now osg@auth-service osg@user-service \
+#     osg@gateway-service osg@ussd-service osg@sms-service \
+#     osg@transaction-service osg@notification-service osg@api-gateway
+
+[Unit]
+Description=OS Gateway %i
+After=network.target postgresql.service redis-server.service rabbitmq-server.service
+Wants=postgresql.service redis-server.service rabbitmq-server.service
+
+[Service]
+Type=simple
+User=osgateway
+Group=osgateway
+WorkingDirectory=/opt/osgateway/apps
+EnvironmentFile=/etc/osgateway/osgateway.env
+ExecStart=/usr/bin/java -jar /opt/osgateway/apps/%i-1.0.0-SNAPSHOT.jar
+Restart=on-failure
+RestartSec=8
+SuccessExitStatus=143
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
