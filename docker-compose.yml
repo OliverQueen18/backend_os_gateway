@@ -1,69 +1,103 @@
+# OS Gateway — stack complète (VPS ≥ 8 Go RAM recommandé)
+#
+# Local / VPS :
+#   cp .env.example .env   # éditer les secrets
+#   mvn -DskipTests package
+#   docker compose up -d --build
+#
+# API (hôte) : http://127.0.0.1:18080
+# Nginx hôte (prod) : deploy/ubuntu/nginx-osgateway.conf → HTTPS + frontend
+#
+# Observabilité (optionnel) :
+#   docker compose --profile obs up -d
+#
+# Nginx dans Docker (optionnel, conflit avec Nginx hôte sur :80) :
+#   docker compose --profile docker-nginx up -d
+
+name: osgateway
+
 services:
   postgres:
     image: postgres:16-alpine
     container_name: osg-postgres
+    restart: unless-stopped
     environment:
-      POSTGRES_DB: os_gateway
-      POSTGRES_USER: osgateway
-      POSTGRES_PASSWORD: osgateway
-    command: ["postgres", "-c", "max_connections=200"]
+      POSTGRES_DB: ${POSTGRES_DB:-os_gateway}
+      POSTGRES_USER: ${POSTGRES_USER:-osgateway}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-osgateway}
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./sql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
       - ./sql/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U osgateway -d os_gateway"]
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
       interval: 10s
       timeout: 5s
       retries: 10
+    mem_limit: 768m
     networks: [osg-net]
 
   redis:
     image: redis:7-alpine
     container_name: osg-redis
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 3s
       retries: 10
+    mem_limit: 192m
     networks: [osg-net]
 
   rabbitmq:
     image: rabbitmq:3.13-management-alpine
     container_name: osg-rabbitmq
+    restart: unless-stopped
     environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-      # Avoid blocking publishers when the host is tight on RAM (local stack).
-      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit vm_memory_high_watermark float 0.85"
+      RABBITMQ_DEFAULT_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-guest}
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit vm_memory_high_watermark float 0.6"
     ports:
-      - "5672:5672"
-      - "15672:15672"
+      - "127.0.0.1:5672:5672"
+      - "127.0.0.1:15672:15672"
     healthcheck:
       test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
       interval: 15s
       timeout: 10s
       retries: 10
       start_period: 60s
+    mem_limit: 512m
     networks: [osg-net]
 
   auth-service:
     build: ./auth-service
+    restart: unless-stopped
     environment: &svc-env
-      DB_URL: jdbc:postgresql://postgres:5432/os_gateway
-      DB_USER: osgateway
-      DB_PASSWORD: osgateway
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-os_gateway}
+      DB_USER: ${POSTGRES_USER:-osgateway}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-osgateway}
       REDIS_HOST: redis
       RABBITMQ_HOST: rabbitmq
-      JWT_SECRET: osgateway-dev-secret-key-change-me-32chars-min
-      # Keep total JDBC clients under Postgres max_connections (many microservices).
+      RABBITMQ_USER: ${RABBITMQ_USER:-guest}
+      RABBITMQ_PASSWORD: ${RABBITMQ_PASSWORD:-guest}
+      JWT_SECRET: ${JWT_SECRET:-osgateway-dev-secret-key-change-me-32chars-min}
       SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "5"
       SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
-    ports: ["8081:8081"]
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=70 -Xms128m -Xmx512m}
+    ports:
+      - "127.0.0.1:8081:8081"
+    mem_limit: 640m
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }
@@ -72,12 +106,15 @@ services:
 
   user-service:
     build: ./user-service
+    restart: unless-stopped
     environment:
       <<: *svc-env
       UPLOADS_DIR: /tmp/osgateway-uploads
-    ports: ["8082:8082"]
+    ports:
+      - "127.0.0.1:8082:8082"
     volumes:
       - uploads_data:/tmp/osgateway-uploads
+    mem_limit: 640m
     depends_on:
       postgres: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
@@ -85,28 +122,37 @@ services:
 
   gateway-service:
     build: ./gateway-service
+    restart: unless-stopped
     environment: *svc-env
-    ports: ["8083:8083"]
+    ports:
+      - "127.0.0.1:8083:8083"
+    mem_limit: 640m
     depends_on:
       postgres: { condition: service_healthy }
     networks: [osg-net]
 
   ussd-service:
     build: ./ussd-service
+    restart: unless-stopped
     environment:
       <<: *svc-env
       OPERATOR_LOGO_STORAGE: /app/data/operator-logos
-    ports: ["8084:8084"]
+    ports:
+      - "127.0.0.1:8084:8084"
     volumes:
       - ussd-logos:/app/data/operator-logos
+    mem_limit: 640m
     depends_on:
       postgres: { condition: service_healthy }
     networks: [osg-net]
 
   sms-service:
     build: ./sms-service
+    restart: unless-stopped
     environment: *svc-env
-    ports: ["8085:8085"]
+    ports:
+      - "127.0.0.1:8085:8085"
+    mem_limit: 512m
     depends_on:
       postgres: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
@@ -114,8 +160,11 @@ services:
 
   transaction-service:
     build: ./transaction-service
+    restart: unless-stopped
     environment: *svc-env
-    ports: ["8086:8086"]
+    ports:
+      - "127.0.0.1:8086:8086"
+    mem_limit: 640m
     depends_on:
       postgres: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
@@ -123,15 +172,16 @@ services:
 
   notification-service:
     build: ./notification-service
+    restart: unless-stopped
     environment:
       <<: *svc-env
-      # Prefer file mount (local). Or set FIREBASE_CREDENTIALS_JSON in .env (one-line JSON).
       FIREBASE_CREDENTIALS_JSON: ${FIREBASE_CREDENTIALS_JSON:-}
-      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-/secrets/nga-siguida-firebase-adminsdk-5qq9z-b275a57f96.json}
+      FIREBASE_CREDENTIALS_PATH: ${FIREBASE_CREDENTIALS_PATH:-/secrets/firebase-adminsdk.json}
     volumes:
-      # Place the Firebase service-account JSON at ./secrets/firebase-adminsdk.json
       - ./secrets:/secrets:ro
-    ports: ["8087:8087"]
+    ports:
+      - "127.0.0.1:8087:8087"
+    mem_limit: 512m
     depends_on:
       postgres: { condition: service_healthy }
       rabbitmq: { condition: service_healthy }
@@ -139,28 +189,37 @@ services:
 
   audit-service:
     build: ./audit-service
+    restart: unless-stopped
     environment: *svc-env
-    ports: ["8088:8088"]
+    ports:
+      - "127.0.0.1:8088:8088"
+    mem_limit: 512m
     depends_on:
       postgres: { condition: service_healthy }
     networks: [osg-net]
 
   reporting-service:
     build: ./reporting-service
+    restart: unless-stopped
     environment: *svc-env
-    ports: ["8089:8089"]
+    ports:
+      - "127.0.0.1:8089:8089"
+    mem_limit: 512m
     depends_on:
       postgres: { condition: service_healthy }
     networks: [osg-net]
 
   scheduler-service:
     build: ./scheduler-service
+    restart: unless-stopped
     environment:
       <<: *svc-env
       GATEWAY_SERVICE_URL: http://gateway-service:8083
       TRANSACTION_SERVICE_URL: http://transaction-service:8086
       USSD_SERVICE_URL: http://ussd-service:8084
-    ports: ["8090:8090"]
+    ports:
+      - "127.0.0.1:8090:8090"
+    mem_limit: 512m
     depends_on:
       - gateway-service
       - transaction-service
@@ -169,20 +228,24 @@ services:
 
   monitoring-service:
     build: ./monitoring-service
+    restart: unless-stopped
     environment: *svc-env
-    ports: ["8091:8091"]
+    ports:
+      - "127.0.0.1:8091:8091"
+    mem_limit: 512m
     depends_on:
       postgres: { condition: service_healthy }
     networks: [osg-net]
 
   api-gateway:
     build: ./api-gateway
+    restart: unless-stopped
     environment:
       REDIS_HOST: redis
-      JWT_SECRET: osgateway-dev-secret-key-change-me-32chars-min
-      # Dev: avoid 429 during console polling + login attempts
-      RATE_LIMIT_RPM: 2000
-      RATE_LIMIT_ENABLED: "false"
+      JWT_SECRET: ${JWT_SECRET:-osgateway-dev-secret-key-change-me-32chars-min}
+      RATE_LIMIT_RPM: ${RATE_LIMIT_RPM:-2000}
+      RATE_LIMIT_ENABLED: ${RATE_LIMIT_ENABLED:-false}
+      JAVA_TOOL_OPTIONS: ${JAVA_TOOL_OPTIONS:--XX:MaxRAMPercentage=70 -Xms128m -Xmx512m}
       AUTH_SERVICE_URL: http://auth-service:8081
       USER_SERVICE_URL: http://user-service:8082
       GATEWAY_SERVICE_URL: http://gateway-service:8083
@@ -194,18 +257,24 @@ services:
       REPORTING_SERVICE_URL: http://reporting-service:8089
       SCHEDULER_SERVICE_URL: http://scheduler-service:8090
       MONITORING_SERVICE_URL: http://monitoring-service:8091
-    # 18080 évite le conflit avec Apache local (httpd) déjà sur 8080
-    ports: ["18080:8080"]
+    # Exposé sur localhost pour Nginx hôte (HTTPS)
+    ports:
+      - "127.0.0.1:18080:8080"
+    mem_limit: 640m
     depends_on:
       - auth-service
       - user-service
       - gateway-service
+      - transaction-service
       - redis
     networks: [osg-net]
 
+  # Optionnel : Nginx dans Docker (désactivé par défaut — utiliser Nginx hôte + Certbot)
   nginx:
+    profiles: ["docker-nginx"]
     image: nginx:1.27-alpine
     container_name: osg-nginx
+    restart: unless-stopped
     ports:
       - "80:80"
     volumes:
@@ -215,22 +284,28 @@ services:
     networks: [osg-net]
 
   prometheus:
+    profiles: ["obs"]
     image: prom/prometheus:v2.54.1
     container_name: osg-prometheus
+    restart: unless-stopped
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
     volumes:
       - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    mem_limit: 384m
     networks: [osg-net]
 
   grafana:
+    profiles: ["obs"]
     image: grafana/grafana:11.2.0
     container_name: osg-grafana
+    restart: unless-stopped
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     environment:
-      GF_SECURITY_ADMIN_USER: admin
-      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+    mem_limit: 256m
     depends_on:
       - prometheus
     networks: [osg-net]
