@@ -1,0 +1,705 @@
+version: "3.9"
+
+services:
+# ==================================================
+# Reverse Proxy + Let's Encrypt
+# ==================================================
+  nginx-proxy:
+    image: jwilder/nginx-proxy:alpine
+    container_name: nginx-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/tmp/docker.sock:ro
+      - ./data/certs:/etc/nginx/certs:rw
+      - ./data/vhost.d:/etc/nginx/vhost.d
+      - ./data/html:/usr/share/nginx/html
+    networks:
+      - proxy
+
+  letsencrypt:
+    image: jrcs/letsencrypt-nginx-proxy-companion
+    container_name: nginx-letsencrypt
+    restart: unless-stopped
+    environment:
+      NGINX_PROXY_CONTAINER: nginx-proxy
+      DEFAULT_EMAIL: ${LETSENCRYPT_EMAIL}
+    depends_on:
+      - nginx-proxy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./data/certs:/etc/nginx/certs:rw
+      - ./data/vhost.d:/etc/nginx/vhost.d
+      - ./data/html:/usr/share/nginx/html
+    networks:
+      - proxy
+
+
+# ==================================================
+# E-RENDEZ-VOUS
+# ==================================================
+
+  mysql-erdv:
+    image: mysql:8.0
+    container_name: mysql-erdv
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: ${ERDV_DB}
+      MYSQL_USER: ${ERDV_DB_USER}
+      MYSQL_PASSWORD: ${ERDV_DB_PASS}
+      MYSQL_ROOT_PASSWORD: ${ERDV_DB_ROOT}
+    volumes:
+      - erdv_mysql:/var/lib/mysql
+    networks:
+      - erdv
+
+  backend-erdv:
+    image: oliverqueen18/backend-erdv:latest
+    container_name: backend-erdv
+    restart: unless-stopped
+    expose:
+      - "9000"
+    depends_on:
+      - mysql-erdv
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_PORT: 9000
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql-erdv:3306/${ERDV_DB}?createDatabaseIfNotExist=true&useSSL=false&serverTimezone=UTC
+      SPRING_DATASOURCE_USERNAME: ${ERDV_DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${ERDV_DB_PASS}
+      JWT_SECRET: ${ERDV_JWT_SECRET}
+      MAIL_USERNAME: ${SMTP_USER}
+      MAIL_PASSWORD: ${SMTP_PASSWORD}
+      ERDV_UPLOAD_DIR: ${ERDV_UPLOAD_DIR}
+      SMS_GATEWAY_ENABLED: ${SMS_GATEWAY_ENABLED}
+      SMS_GATEWAY_API_KEY: ${SMS_GATEWAY_API_KEY}
+      VIRTUAL_HOST: api.e-rendez-vous.com
+      VIRTUAL_PORT: 9000
+      LETSENCRYPT_HOST: api.e-rendez-vous.com
+    volumes:
+      - ${ERDV_UPLOAD_HOST_PATH}:/app/uploads/ERDV
+    networks:
+      - erdv
+      - proxy
+
+  frontend-erdv:
+    image: oliverqueen18/frontend-erdvmali:latest
+    container_name: frontend-erdv
+    restart: unless-stopped
+    expose:
+      - "80"
+    environment:
+      API_URL: https://api.e-rendez-vous.com/api
+      VIRTUAL_HOST: e-rendez-vous.com,www.e-rendez-vous.com,erdv.ml,www.erdv.ml
+      LETSENCRYPT_HOST: e-rendez-vous.com,www.e-rendez-vous.com,erdv.ml,www.erdv.ml
+      VIRTUAL_PORT: 80
+    networks:
+      - proxy
+
+  phpmyadmin-erdv:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: phpmyadmin-erdv
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - mysql-erdv
+    environment:
+      PMA_HOST: mysql-erdv
+      PMA_USER: ${ERDV_DB_USER}
+      PMA_PASSWORD: ${ERDV_DB_PASS}
+      VIRTUAL_HOST: phpmyadmin.e-rendez-vous.com
+      LETSENCRYPT_HOST: phpmyadmin.e-rendez-vous.com
+    networks:
+      - erdv
+      - proxy
+
+# ==================================================
+# PIE ML
+# ==================================================
+
+  postgres-pieml:
+    image: postgres:16-alpine
+    container_name: postgres-pieml
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PIEML_DB}
+      POSTGRES_USER: ${PIEML_DB_USER}
+      POSTGRES_PASSWORD: ${PIEML_DB_PASS}
+    volumes:
+      - pieml_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PIEML_DB_USER} -d ${PIEML_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pieml
+
+  backend-pieml:
+    image: oliverqueen18/pieml-backend:latest
+    container_name: backend-pieml
+    restart: unless-stopped
+    expose:
+      - "7000"
+    depends_on:
+      postgres-pieml:
+        condition: service_healthy
+    environment:
+      SERVER_PORT: 7000
+      DB_HOST: postgres-pieml
+      DB_PORT: 5432
+      DB_NAME: ${PIEML_DB}
+      DB_USER: ${PIEML_DB_USER}
+      DB_PASSWORD: ${PIEML_DB_PASS}
+      JWT_SECRET: ${PIEML_JWT_SECRET}
+      UPLOAD_DIR: ${PIEML_UPLOAD_DIR}
+      MAIL_ENABLED: "true"
+      MAIL_HOST: smtp.gmail.com
+      MAIL_PORT: 587
+      MAIL_USERNAME: ${SMTP_USER}
+      MAIL_PASSWORD: ${SMTP_PASSWORD}
+      MAIL_FROM: ${SMTP_USER}
+      MAIL_FROM_NAME: PIE ML
+      VIRTUAL_HOST: api.e-pie.ml
+      VIRTUAL_PORT: 7000
+      LETSENCRYPT_HOST: api.e-pie.ml
+    volumes:
+      - ${PIEML_UPLOAD_HOST_PATH}:/app/uploads/PIEML
+    networks:
+      - pieml
+      - proxy
+
+  frontend-pieml:
+    image: oliverqueen18/pieml-frontend:latest
+    container_name: frontend-pieml
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - backend-pieml
+    environment:
+      BACKEND_HOST: backend-pieml
+      BACKEND_PORT: 7000
+      API_URL: https://api.e-pie.ml/api
+      VIRTUAL_HOST: e-pie.ml,www.e-pie.ml
+      LETSENCRYPT_HOST: e-pie.ml,www.e-pie.ml
+      VIRTUAL_PORT: 80
+    networks:
+      - proxy
+
+  pgadmin-pieml:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin-pieml
+    restart: unless-stopped
+    depends_on:
+      - postgres-pieml
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD}
+      VIRTUAL_HOST: pgadmin.e-pie.ml
+      LETSENCRYPT_HOST: pgadmin.e-pie.ml
+      VIRTUAL_PORT: 80
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - pieml
+      - proxy
+
+# ==================================================
+# TONTINE MARCHÉ
+# ==================================================
+
+  postgres-tontine:
+    image: postgres:16-alpine
+    container_name: postgres-tontine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${TONTINE_DB}
+      POSTGRES_USER: ${TONTINE_DB_USER}
+      POSTGRES_PASSWORD: ${TONTINE_DB_PASS}
+    volumes:
+      - tontine_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${TONTINE_DB_USER} -d ${TONTINE_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - tontine
+
+  backend-tontine:
+    image: oliverqueen18/backend-tontine:latest
+    container_name: backend-tontine
+    restart: unless-stopped
+    expose:
+      - "6000"
+    depends_on:
+      postgres-tontine:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SERVER_PORT: 6000
+      DB_HOST: postgres-tontine
+      DB_PORT: 5432
+      DB_NAME: ${TONTINE_DB}
+      DB_USER: ${TONTINE_DB_USER}
+      DB_PASSWORD: ${TONTINE_DB_PASS}
+      UPLOAD_DIR: ${TONTINE_UPLOAD_DIR}
+      JWT_SECRET: ${TONTINE_JWT_SECRET}
+      MAIL_ENABLED: "true"
+      MAIL_HOST: smtp.gmail.com
+      MAIL_PORT: 587
+      MAIL_USERNAME: ${SMTP_USER}
+      MAIL_PASSWORD: ${SMTP_PASSWORD}
+      MAIL_FROM: ${SMTP_USER}
+      MAIL_FROM_NAME: Tontine Marché
+      VIRTUAL_HOST: api.tontine-marche.com
+      VIRTUAL_PORT: 6000
+      LETSENCRYPT_HOST: api.tontine-marche.com
+    volumes:
+      - ${TONTINE_UPLOAD_HOST_PATH}:/app/uploads/TONTINE
+    networks:
+      - tontine
+      - proxy
+
+  frontend-tontine:
+    image: oliverqueen18/frontend-tontine:latest
+    container_name: frontend-tontine
+    restart: unless-stopped
+    depends_on:
+      - backend-tontine
+    expose:
+      - "80"
+    environment:
+      API_URL: https://api.tontine-marche.com/api
+      BACKEND_HOST: backend-tontine
+      BACKEND_PORT: 6000
+      VIRTUAL_HOST: tontine-marche.com,www.tontine-marche.com
+      LETSENCRYPT_HOST: tontine-marche.com,www.tontine-marche.com
+      VIRTUAL_PORT: 80
+    networks:
+      - proxy
+
+  pgadmin-tontine:
+    image: dpage/pgadmin4:latest
+    container_name: pgadmin-tontine
+    restart: unless-stopped
+    depends_on:
+      - postgres-tontine
+    expose:
+      - "8080"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_TONTINE_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_TONTINE_PASSWORD}
+      PGADMIN_LISTEN_ADDRESS: "0.0.0.0"
+      PGADMIN_LISTEN_PORT: "8080"
+      PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION: "False"
+      VIRTUAL_HOST: pgadmin.tontine-marche.com
+      VIRTUAL_PORT: "8080"
+      LETSENCRYPT_HOST: pgadmin.tontine-marche.com
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+    volumes:
+      - pgadmin_tontine_data:/var/lib/pgadmin
+    networks:
+      - tontine
+      - proxy
+
+# ==================================================
+# GESTION DE CREDIT
+# ==================================================
+
+  mysql-credit:
+    image: mysql:8.0
+    container_name: mysql-credit
+    restart: unless-stopped
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --default-authentication-plugin=mysql_native_password
+    environment:
+      MYSQL_DATABASE: ${CREDIT_DB}
+      MYSQL_USER: ${CREDIT_DB_USER}
+      MYSQL_PASSWORD: ${CREDIT_DB_PASS}
+      MYSQL_ROOT_PASSWORD: ${CREDIT_DB_ROOT}
+    volumes:
+      - credit_mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - credit
+
+  app-credit:
+    image: oliverqueen18/gestion-credit:latest
+    build:
+      context: ./gestion-credit
+      dockerfile: Dockerfile
+    container_name: app-credit
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      mysql-credit:
+        condition: service_healthy
+    environment:
+      APP_NAME: "Gestion de Credit"
+      APP_ENV: production
+      APP_DEBUG: "false"
+      APP_URL: https://${CREDIT_HOST}
+      APP_KEY: ${CREDIT_APP_KEY}
+      APP_LOCALE: fr
+      APP_FALLBACK_LOCALE: fr
+      LOG_CHANNEL: stderr
+      LOG_LEVEL: info
+      DB_CONNECTION: mysql
+      DB_HOST: mysql-credit
+      DB_PORT: 3306
+      DB_DATABASE: ${CREDIT_DB}
+      DB_USERNAME: ${CREDIT_DB_USER}
+      DB_PASSWORD: ${CREDIT_DB_PASS}
+      SESSION_DRIVER: database
+      CACHE_STORE: database
+      QUEUE_CONNECTION: database
+      FILESYSTEM_DISK: public
+      MAIL_MAILER: smtp
+      MAIL_HOST: smtp.gmail.com
+      MAIL_PORT: 587
+      MAIL_USERNAME: ${SMTP_USER}
+      MAIL_PASSWORD: ${SMTP_PASSWORD}
+      MAIL_FROM_ADDRESS: ${SMTP_USER}
+      MAIL_FROM_NAME: "Gestion de Credit"
+      VIRTUAL_HOST: ${CREDIT_HOST}
+      VIRTUAL_PORT: 80
+      LETSENCRYPT_HOST: ${CREDIT_HOST}
+    volumes:
+      - credit_storage:/var/www/html/storage/app
+      - credit_logs:/var/www/html/storage/logs
+      - ${CREDIT_UPLOAD_HOST_PATH}:/var/www/html/storage/app/public
+    networks:
+      - credit
+      - proxy
+
+  phpmyadmin-credit:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: phpmyadmin-credit
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      mysql-credit:
+        condition: service_healthy
+    environment:
+      PMA_HOST: mysql-credit
+      PMA_USER: ${CREDIT_DB_USER}
+      PMA_PASSWORD: ${CREDIT_DB_PASS}
+      PMA_ABSOLUTE_URI: https://phpmyadmin-credit.olive-services.net/
+      VIRTUAL_HOST: phpmyadmin-credit.olive-services.net
+      LETSENCRYPT_HOST: phpmyadmin-credit.olive-services.net
+    networks:
+      - credit
+      - proxy
+
+# ==================================================
+# OS GATEWAY (osgateway.olive-services.net)
+# ==================================================
+
+  postgres-osgateway:
+    image: postgres:16-alpine
+    container_name: postgres-osgateway
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${OSGATEWAY_DB}
+      POSTGRES_USER: ${OSGATEWAY_DB_USER}
+      POSTGRES_PASSWORD: ${OSGATEWAY_DB_PASS}
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+    volumes:
+      - osgateway_pgdata:/var/lib/postgresql/data
+      - ./OSGATEWAY/sql/01_schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./OSGATEWAY/sql/02_seed.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 768m
+    networks:
+      - osgateway
+
+  redis-osgateway:
+    image: redis:7-alpine
+    container_name: redis-osgateway
+    restart: unless-stopped
+    command: ["redis-server", "--maxmemory", "128mb", "--maxmemory-policy", "allkeys-lru"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    mem_limit: 192m
+    networks:
+      - osgateway
+
+  rabbitmq-osgateway:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq-osgateway
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: ${OSGATEWAY_RABBITMQ_USER}
+      RABBITMQ_DEFAULT_PASS: ${OSGATEWAY_RABBITMQ_PASS}
+      RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: "-rabbit vm_memory_high_watermark float 0.6"
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+      start_period: 60s
+    mem_limit: 512m
+    networks:
+      - osgateway
+
+  osgateway-auth-service:
+    image: oliverqueen18/osgateway-auth-service:${OSG_TAG:-latest}
+    container_name: osgateway-auth-service
+    restart: unless-stopped
+    environment: &osg-env
+      DB_URL: jdbc:postgresql://postgres-osgateway:5432/${OSGATEWAY_DB}
+      DB_USER: ${OSGATEWAY_DB_USER}
+      DB_PASSWORD: ${OSGATEWAY_DB_PASS}
+      REDIS_HOST: redis-osgateway
+      RABBITMQ_HOST: rabbitmq-osgateway
+      RABBITMQ_USER: ${OSGATEWAY_RABBITMQ_USER}
+      RABBITMQ_PASSWORD: ${OSGATEWAY_RABBITMQ_PASS}
+      JWT_SECRET: ${OSGATEWAY_JWT_SECRET}
+      SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: "5"
+      SPRING_DATASOURCE_HIKARI_MINIMUM_IDLE: "1"
+      JAVA_TOOL_OPTIONS: ${OSGATEWAY_JAVA_OPTS:--XX:MaxRAMPercentage=70 -Xms128m -Xmx512m}
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+      redis-osgateway: { condition: service_healthy }
+      rabbitmq-osgateway: { condition: service_healthy }
+    mem_limit: 640m
+    networks:
+      - osgateway
+
+  osgateway-user-service:
+    image: oliverqueen18/osgateway-user-service:${OSG_TAG:-latest}
+    container_name: osgateway-user-service
+    restart: unless-stopped
+    environment:
+      <<: *osg-env
+      UPLOADS_DIR: /tmp/osgateway-uploads
+    volumes:
+      - osgateway_uploads:/tmp/osgateway-uploads
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+      rabbitmq-osgateway: { condition: service_healthy }
+    mem_limit: 640m
+    networks:
+      - osgateway
+
+  osgateway-gateway-service:
+    image: oliverqueen18/osgateway-gateway-service:${OSG_TAG:-latest}
+    container_name: osgateway-gateway-service
+    restart: unless-stopped
+    environment: *osg-env
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+    mem_limit: 640m
+    networks:
+      - osgateway
+
+  osgateway-ussd-service:
+    image: oliverqueen18/osgateway-ussd-service:${OSG_TAG:-latest}
+    container_name: osgateway-ussd-service
+    restart: unless-stopped
+    environment:
+      <<: *osg-env
+      OPERATOR_LOGO_STORAGE: /app/data/operator-logos
+    volumes:
+      - osgateway_logos:/app/data/operator-logos
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+    mem_limit: 640m
+    networks:
+      - osgateway
+
+  osgateway-sms-service:
+    image: oliverqueen18/osgateway-sms-service:${OSG_TAG:-latest}
+    container_name: osgateway-sms-service
+    restart: unless-stopped
+    environment: *osg-env
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+      rabbitmq-osgateway: { condition: service_healthy }
+    mem_limit: 512m
+    networks:
+      - osgateway
+
+  osgateway-transaction-service:
+    image: oliverqueen18/osgateway-transaction-service:${OSG_TAG:-latest}
+    container_name: osgateway-transaction-service
+    restart: unless-stopped
+    environment: *osg-env
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+      rabbitmq-osgateway: { condition: service_healthy }
+    mem_limit: 640m
+    networks:
+      - osgateway
+
+  osgateway-notification-service:
+    image: oliverqueen18/osgateway-notification-service:${OSG_TAG:-latest}
+    container_name: osgateway-notification-service
+    restart: unless-stopped
+    environment:
+      <<: *osg-env
+      FIREBASE_CREDENTIALS_JSON: ${OSGATEWAY_FIREBASE_CREDENTIALS_JSON:-}
+      FIREBASE_CREDENTIALS_PATH: ${OSGATEWAY_FIREBASE_CREDENTIALS_PATH:-/secrets/firebase-adminsdk.json}
+    volumes:
+      - ${OSGATEWAY_SECRETS_HOST_PATH:-./OSGATEWAY/secrets}:/secrets:ro
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+      rabbitmq-osgateway: { condition: service_healthy }
+    mem_limit: 512m
+    networks:
+      - osgateway
+
+  osgateway-audit-service:
+    image: oliverqueen18/osgateway-audit-service:${OSG_TAG:-latest}
+    container_name: osgateway-audit-service
+    restart: unless-stopped
+    environment: *osg-env
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+    mem_limit: 512m
+    networks:
+      - osgateway
+
+  osgateway-reporting-service:
+    image: oliverqueen18/osgateway-reporting-service:${OSG_TAG:-latest}
+    container_name: osgateway-reporting-service
+    restart: unless-stopped
+    environment: *osg-env
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+    mem_limit: 512m
+    networks:
+      - osgateway
+
+  osgateway-scheduler-service:
+    image: oliverqueen18/osgateway-scheduler-service:${OSG_TAG:-latest}
+    container_name: osgateway-scheduler-service
+    restart: unless-stopped
+    environment:
+      <<: *osg-env
+      GATEWAY_SERVICE_URL: http://osgateway-gateway-service:8083
+      TRANSACTION_SERVICE_URL: http://osgateway-transaction-service:8086
+      USSD_SERVICE_URL: http://osgateway-ussd-service:8084
+    depends_on:
+      - osgateway-gateway-service
+      - osgateway-transaction-service
+      - rabbitmq-osgateway
+    mem_limit: 512m
+    networks:
+      - osgateway
+
+  osgateway-monitoring-service:
+    image: oliverqueen18/osgateway-monitoring-service:${OSG_TAG:-latest}
+    container_name: osgateway-monitoring-service
+    restart: unless-stopped
+    environment: *osg-env
+    depends_on:
+      postgres-osgateway: { condition: service_healthy }
+    mem_limit: 512m
+    networks:
+      - osgateway
+
+  osgateway-api-gateway:
+    image: oliverqueen18/osgateway-api-gateway:${OSG_TAG:-latest}
+    container_name: osgateway-api-gateway
+    restart: unless-stopped
+    expose:
+      - "8080"
+    environment:
+      SERVER_PORT: 8080
+      REDIS_HOST: redis-osgateway
+      JWT_SECRET: ${OSGATEWAY_JWT_SECRET}
+      RATE_LIMIT_RPM: ${OSGATEWAY_RATE_LIMIT_RPM:-2000}
+      RATE_LIMIT_ENABLED: ${OSGATEWAY_RATE_LIMIT_ENABLED:-false}
+      JAVA_TOOL_OPTIONS: ${OSGATEWAY_JAVA_OPTS:--XX:MaxRAMPercentage=70 -Xms128m -Xmx512m}
+      AUTH_SERVICE_URL: http://osgateway-auth-service:8081
+      USER_SERVICE_URL: http://osgateway-user-service:8082
+      GATEWAY_SERVICE_URL: http://osgateway-gateway-service:8083
+      USSD_SERVICE_URL: http://osgateway-ussd-service:8084
+      SMS_SERVICE_URL: http://osgateway-sms-service:8085
+      TRANSACTION_SERVICE_URL: http://osgateway-transaction-service:8086
+      NOTIFICATION_SERVICE_URL: http://osgateway-notification-service:8087
+      AUDIT_SERVICE_URL: http://osgateway-audit-service:8088
+      REPORTING_SERVICE_URL: http://osgateway-reporting-service:8089
+      SCHEDULER_SERVICE_URL: http://osgateway-scheduler-service:8090
+      MONITORING_SERVICE_URL: http://osgateway-monitoring-service:8091
+    depends_on:
+      - osgateway-auth-service
+      - osgateway-user-service
+      - osgateway-gateway-service
+      - osgateway-transaction-service
+      - redis-osgateway
+    mem_limit: 640m
+    networks:
+      - osgateway
+
+  frontend-osgateway:
+    image: oliverqueen18/frontend-osgateway:${OSG_TAG:-latest}
+    container_name: frontend-osgateway
+    restart: unless-stopped
+    expose:
+      - "80"
+    depends_on:
+      - osgateway-api-gateway
+    environment:
+      VIRTUAL_HOST: ${OSGATEWAY_HOST:-osgateway.olive-services.net}
+      LETSENCRYPT_HOST: ${OSGATEWAY_HOST:-osgateway.olive-services.net}
+      LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
+      VIRTUAL_PORT: 80
+    mem_limit: 128m
+    networks:
+      - osgateway
+      - proxy
+
+# ==================================================
+# Volumes
+# ==================================================
+
+volumes:
+  erdv_mysql:
+  pieml_pgdata:
+  pieml_uploads:
+  pgadmin_data:
+  tontine_pgdata:
+  tontine_uploads:
+  pgadmin_tontine_data:
+  credit_mysql:
+  credit_storage:
+  credit_logs:
+  osgateway_pgdata:
+  osgateway_uploads:
+  osgateway_logos:
+
+# ==================================================
+# Networks
+# ==================================================
+
+networks:
+  proxy:
+  erdv:
+  pieml:
+  tontine:
+  credit:
+  osgateway:
