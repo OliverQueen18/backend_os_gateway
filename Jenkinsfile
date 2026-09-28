@@ -34,13 +34,13 @@ pipeline {
         )
         string(
             name: 'DEPLOY_PATH',
-            defaultValue: '/home/adminubuntu/OliveApps/OSGATEWAY/backend',
-            description: 'Chemin du repo backend sur le VPS'
+            defaultValue: '/home/adminubuntu/OliveApps',
+            description: 'Dossier OliveApps (docker-compose.yml + prod.env)'
         )
         string(
             name: 'ENV_FILE',
             defaultValue: '/home/adminubuntu/OliveApps/prod.env',
-            description: 'Fichier env OliveApps (contient le bloc OSGATEWAY_*)'
+            description: 'Fichier env OliveApps'
         )
     }
 
@@ -120,30 +120,30 @@ pipeline {
                 expression { params.DEPLOY }
             }
             steps {
-                sshagent(credentials: ['oliveapps-ssh']) {
+                withCredentials([sshUserPrivateKey(
+                    credentialsId: 'oliveapps-ssh',
+                    keyFileVariable: 'SSH_KEY'
+                )]) {
                     sh """
                     set -e
-                    ssh -o StrictHostKeyChecking=no ${params.DEPLOY_HOST} bash -s <<ENDSSH
+                    chmod 600 "\$SSH_KEY"
+                    ssh -i "\$SSH_KEY" -o StrictHostKeyChecking=no ${params.DEPLOY_HOST} bash -s <<ENDSSH
 set -e
 cd ${params.DEPLOY_PATH}
-git pull --ff-only || true
-if [ -f "${params.ENV_FILE}" ]; then
-  grep -E '^(OSGATEWAY_|POSTGRES_|JWT_|RABBITMQ_|JAVA_TOOL_|RATE_LIMIT_|FIREBASE_|GRAFANA_)' "${params.ENV_FILE}" > .env.osg.tmp || true
-  if [ -s .env.osg.tmp ]; then
-    sed -E \\
-      -e 's/^OSGATEWAY_DB=/POSTGRES_DB=/' \\
-      -e 's/^OSGATEWAY_DB_USER=/POSTGRES_USER=/' \\
-      -e 's/^OSGATEWAY_DB_PASS=/POSTGRES_PASSWORD=/' \\
-      -e 's/^OSGATEWAY_JWT_SECRET=/JWT_SECRET=/' \\
-      -e 's/^OSGATEWAY_RABBITMQ_USER=/RABBITMQ_USER=/' \\
-      -e 's/^OSGATEWAY_RABBITMQ_PASS=/RABBITMQ_PASSWORD=/' \\
-      .env.osg.tmp > .env
-    rm -f .env.osg.tmp
-  fi
-fi
 export OSG_TAG=${DOCKER_TAG}
-docker compose pull || true
-docker compose up -d --remove-orphans
+docker compose --env-file ${params.ENV_FILE} pull \\
+  osgateway-auth-service osgateway-user-service osgateway-gateway-service \\
+  osgateway-ussd-service osgateway-sms-service osgateway-transaction-service \\
+  osgateway-notification-service osgateway-audit-service osgateway-reporting-service \\
+  osgateway-scheduler-service osgateway-monitoring-service osgateway-api-gateway \\
+  frontend-osgateway || true
+docker compose --env-file ${params.ENV_FILE} up -d --remove-orphans \\
+  postgres-osgateway redis-osgateway rabbitmq-osgateway \\
+  osgateway-auth-service osgateway-user-service osgateway-gateway-service \\
+  osgateway-ussd-service osgateway-sms-service osgateway-transaction-service \\
+  osgateway-notification-service osgateway-audit-service osgateway-reporting-service \\
+  osgateway-scheduler-service osgateway-monitoring-service osgateway-api-gateway \\
+  frontend-osgateway
 docker image prune -f || true
 ENDSSH
                     """
