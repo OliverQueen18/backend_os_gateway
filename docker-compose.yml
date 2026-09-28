@@ -81,6 +81,7 @@ services:
     networks: [osg-net]
 
   auth-service:
+    image: oliverqueen18/osgateway-auth-service:${OSG_TAG:-latest}
     build: ./auth-service
     restart: unless-stopped
     environment: &svc-env
@@ -105,6 +106,7 @@ services:
     networks: [osg-net]
 
   user-service:
+    image: oliverqueen18/osgateway-user-service:${OSG_TAG:-latest}
     build: ./user-service
     restart: unless-stopped
     environment:
@@ -121,6 +123,7 @@ services:
     networks: [osg-net]
 
   gateway-service:
+    image: oliverqueen18/osgateway-gateway-service:${OSG_TAG:-latest}
     build: ./gateway-service
     restart: unless-stopped
     environment: *svc-env
@@ -132,6 +135,7 @@ services:
     networks: [osg-net]
 
   ussd-service:
+    image: oliverqueen18/osgateway-ussd-service:${OSG_TAG:-latest}
     build: ./ussd-service
     restart: unless-stopped
     environment:
@@ -147,6 +151,7 @@ services:
     networks: [osg-net]
 
   sms-service:
+    image: oliverqueen18/osgateway-sms-service:${OSG_TAG:-latest}
     build: ./sms-service
     restart: unless-stopped
     environment: *svc-env
@@ -159,6 +164,7 @@ services:
     networks: [osg-net]
 
   transaction-service:
+    image: oliverqueen18/osgateway-transaction-service:${OSG_TAG:-latest}
     build: ./transaction-service
     restart: unless-stopped
     environment: *svc-env
@@ -171,6 +177,7 @@ services:
     networks: [osg-net]
 
   notification-service:
+    image: oliverqueen18/osgateway-notification-service:${OSG_TAG:-latest}
     build: ./notification-service
     restart: unless-stopped
     environment:
@@ -188,6 +195,7 @@ services:
     networks: [osg-net]
 
   audit-service:
+    image: oliverqueen18/osgateway-audit-service:${OSG_TAG:-latest}
     build: ./audit-service
     restart: unless-stopped
     environment: *svc-env
@@ -199,6 +207,7 @@ services:
     networks: [osg-net]
 
   reporting-service:
+    image: oliverqueen18/osgateway-reporting-service:${OSG_TAG:-latest}
     build: ./reporting-service
     restart: unless-stopped
     environment: *svc-env
@@ -210,6 +219,7 @@ services:
     networks: [osg-net]
 
   scheduler-service:
+    image: oliverqueen18/osgateway-scheduler-service:${OSG_TAG:-latest}
     build: ./scheduler-service
     restart: unless-stopped
     environment:
@@ -227,6 +237,7 @@ services:
     networks: [osg-net]
 
   monitoring-service:
+    image: oliverqueen18/osgateway-monitoring-service:${OSG_TAG:-latest}
     build: ./monitoring-service
     restart: unless-stopped
     environment: *svc-env
@@ -238,6 +249,7 @@ services:
     networks: [osg-net]
 
   api-gateway:
+    image: oliverqueen18/osgateway-api-gateway:${OSG_TAG:-latest}
     build: ./api-gateway
     restart: unless-stopped
     environment:
