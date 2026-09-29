@@ -99,7 +99,7 @@ public class TransactionController {
     }
 
     @PostMapping("/{id}/cancel")
-    @Operation(summary = "Cancel a cancellable transaction (reason required; refunds amount + commission)")
+    @Operation(summary = "Cancel a cancellable transaction (reason required; zeros commissions, no UV balance change)")
     public ApiResponse<Transaction> cancel(@PathVariable Long id, @RequestBody CancelRequest request) {
         return ApiResponse.ok("Cancelled", transactionService.cancel(
                 id, request.getCancellationReasonId(), request.getNote()));

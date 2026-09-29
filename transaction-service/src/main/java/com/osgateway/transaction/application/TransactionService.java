@@ -74,8 +74,9 @@ public class TransactionService {
         }
         CommissionSplit split = computeCommission(amount, config);
 
+        // Solde UV : vérif. indicative à la création ; débit uniquement à SUCCESS (montant hors commission)
         if (distributorId != null && "DEBIT".equals(config.balanceEffect())) {
-            debitDistributor(distributorId, amount.add(split.total()));
+            assertSufficientBalance(distributorId, amount);
         }
 
         Transaction tx = Transaction.builder()
@@ -304,14 +305,11 @@ public class TransactionService {
         TransactionWorkflow.assertTransition(tx.getStatus(), status);
         String from = tx.getStatus().name();
 
-        // Refund UV (montant + commission) si TX débitée échoue
-        if (status == TransactionStatus.FAILED
+        // Solde UV : mouvement uniquement sur SUCCESS (montant TX, sans commission)
+        if (status == TransactionStatus.SUCCESS
                 && tx.getDistributorId() != null
-                && !"FAILED".equals(from)
-                && !"CANCELLED".equals(from)
-                && "DEBIT".equals(resolveOperationTypeConfig(tx.getType()).balanceEffect())) {
-            BigDecimal refund = tx.getAmount().add(tx.getCommission() != null ? tx.getCommission() : BigDecimal.ZERO);
-            creditDistributor(tx.getDistributorId(), refund);
+                && !"SUCCESS".equals(from)) {
+            applyBalanceOnSuccess(tx);
         }
 
         tx.setStatus(status);
@@ -331,7 +329,7 @@ public class TransactionService {
     }
 
     /**
-     * Annulation console : motif obligatoire, remboursement montant + commission, commissions mises à 0.
+     * Annulation console : motif obligatoire, commissions mises à 0 (aucun mouvement de solde UV).
      */
     @Transactional
     public Transaction cancel(Long id, Long cancellationReasonId, String note) {
@@ -359,14 +357,7 @@ public class TransactionService {
         String from = tx.getStatus().name();
         BigDecimal commissionBefore = tx.getCommission() != null ? tx.getCommission() : BigDecimal.ZERO;
 
-        // Rembourse montant + commission UV
-        if (tx.getDistributorId() != null
-                && "DEBIT".equals(resolveOperationTypeConfig(tx.getType()).balanceEffect())) {
-            BigDecimal refund = tx.getAmount().add(commissionBefore);
-            creditDistributor(tx.getDistributorId(), refund);
-        }
-
-        // Annule la commission sur la transaction (plus comptabilisée)
+        // Annule la commission sur la transaction (plus comptabilisée) — solde UV inchangé (jamais débité)
         tx.setCommission(BigDecimal.ZERO);
         tx.setAdminCommission(BigDecimal.ZERO);
         tx.setDistributorCommission(BigDecimal.ZERO);
@@ -535,6 +526,38 @@ public class TransactionService {
         }
         if (!passwordEncoder.matches(cleaned, hash)) {
             throw new BusinessException(ErrorCode.UNAUTHORIZED, "Code PIN incorrect");
+        }
+    }
+
+    /** Débit/crédit UV à SUCCESS uniquement — montant de la TX, jamais la commission. */
+    private void applyBalanceOnSuccess(Transaction tx) {
+        String effect = resolveOperationTypeConfig(tx.getType()).balanceEffect();
+        BigDecimal amount = tx.getAmount() != null ? tx.getAmount() : BigDecimal.ZERO;
+        if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+            return;
+        }
+        if ("DEBIT".equals(effect)) {
+            debitDistributor(tx.getDistributorId(), amount);
+        } else if ("CREDIT".equals(effect)) {
+            creditDistributor(tx.getDistributorId(), amount);
+        }
+    }
+
+    private void assertSufficientBalance(Long distributorId, BigDecimal amount) {
+        if (amount == null || amount.compareTo(BigDecimal.ZERO) <= 0) {
+            return;
+        }
+        List<BigDecimal> balances = jdbcTemplate.query(
+                "SELECT balance FROM distributor_accounts WHERE id = ? AND active = TRUE",
+                (rs, rowNum) -> rs.getBigDecimal(1),
+                distributorId);
+        if (balances.isEmpty()) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "Distributeur introuvable ou inactif");
+        }
+        BigDecimal balance = balances.getFirst() != null ? balances.getFirst() : BigDecimal.ZERO;
+        if (balance.compareTo(amount) < 0) {
+            throw new BusinessException(ErrorCode.INSUFFICIENT_BALANCE,
+                    "Solde UV insuffisant pour le distributeur " + distributorId);
         }
     }
 
