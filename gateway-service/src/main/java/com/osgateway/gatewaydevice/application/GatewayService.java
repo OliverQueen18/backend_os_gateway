@@ -61,10 +61,16 @@ public class GatewayService {
     }
 
     private GatewayResponse createNew(RegisterRequest request) {
+        if (request.getOperator() == null || request.getOperator().isBlank()) {
+            throw new BusinessException(
+                    ErrorCode.VALIDATION_ERROR,
+                    "Opérateur requis pour un nouveau gateway — créez-le dans la console ou renseignez l'opérateur dans les réglages de l'app"
+            );
+        }
         GatewayDevice gateway = GatewayDevice.builder()
                 .deviceId(request.getDeviceId())
                 .name(request.getName())
-                .operator(request.getOperator())
+                .operator(request.getOperator().trim().toUpperCase())
                 .phoneNumber(request.getPhoneNumber())
                 .status(GatewayStatus.OFFLINE)
                 .loadScore(0)

@@ -12,7 +12,8 @@ public final class GatewayDtos {
     public static class RegisterRequest {
         @NotBlank private String deviceId;
         @NotBlank private String name;
-        @NotBlank private String operator;
+        /** Optionnel si le gateway existe déjà (réutilisation). Obligatoire à la 1re inscription. */
+        private String operator;
         private String phoneNumber;
         private String apiKey;
         /** PIN USSD / Mobile Money (4–6 chiffres). */
