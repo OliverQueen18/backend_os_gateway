@@ -131,19 +131,18 @@ pipeline {
 set -e
 cd ${params.DEPLOY_PATH}
 export OSG_TAG=${DOCKER_TAG}
+# Frontend is tagged by its own Jenkins BUILD_NUMBER. Do not pull or recreate it here.
 docker compose --env-file ${params.ENV_FILE} pull \\
   osgateway-auth-service osgateway-user-service osgateway-gateway-service \\
   osgateway-ussd-service osgateway-sms-service osgateway-transaction-service \\
   osgateway-notification-service osgateway-audit-service osgateway-reporting-service \\
-  osgateway-scheduler-service osgateway-monitoring-service osgateway-api-gateway \\
-  frontend-osgateway || true
+  osgateway-scheduler-service osgateway-monitoring-service osgateway-api-gateway
 docker compose --env-file ${params.ENV_FILE} up -d --remove-orphans \\
   postgres-osgateway redis-osgateway rabbitmq-osgateway \\
   osgateway-auth-service osgateway-user-service osgateway-gateway-service \\
   osgateway-ussd-service osgateway-sms-service osgateway-transaction-service \\
   osgateway-notification-service osgateway-audit-service osgateway-reporting-service \\
-  osgateway-scheduler-service osgateway-monitoring-service osgateway-api-gateway \\
-  frontend-osgateway
+  osgateway-scheduler-service osgateway-monitoring-service osgateway-api-gateway
 docker image prune -f || true
 ENDSSH
                     """
