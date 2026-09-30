@@ -668,6 +668,8 @@ services:
       LETSENCRYPT_HOST: ${OSGATEWAY_HOST:-osgateway.olive-services.net}
       LETSENCRYPT_EMAIL: ${LETSENCRYPT_EMAIL}
       VIRTUAL_PORT: 80
+    volumes:
+      - ./OSGATEWAY/apk:/usr/share/nginx/apk:ro
     mem_limit: 128m
     networks:
       - osgateway
