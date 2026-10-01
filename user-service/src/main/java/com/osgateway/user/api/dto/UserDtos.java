@@ -290,5 +290,66 @@ public final class UserDtos {
         private boolean cancellable;
         private boolean requiresPhone;
         private boolean requiresAmount;
+        private List<OperatorCommissionResponse> operatorCommissions;
+        private List<CommissionRuleResponse> commissionRules;
+    }
+
+    @Data
+    public static class OperatorCommissionRequest {
+        @NotBlank private String operatorCode;
+        /** PERCENT | FIXED */
+        private String commissionMode;
+        private BigDecimal commissionValue;
+        private BigDecimal adminSharePercent;
+        private BigDecimal distributorSharePercent;
+    }
+
+    @Data @Builder
+    public static class OperatorCommissionResponse {
+        private String operatorCode;
+        private String operatorName;
+        private String commissionMode;
+        private BigDecimal commissionValue;
+        private BigDecimal adminSharePercent;
+        private BigDecimal distributorSharePercent;
+    }
+
+    @Data
+    public static class CommissionRuleRequest {
+        @NotBlank private String operatorCode;
+        private BigDecimal amountMin;
+        private BigDecimal amountMax;
+        /** BASE_THEN_SPLIT | DIRECT_ON_AMOUNT */
+        @NotBlank private String calculationMode;
+        private BigDecimal ratePercent;
+        private BigDecimal commissionMin;
+        private BigDecimal commissionMax;
+        @NotNull private BigDecimal distributorRate;
+        @NotNull private BigDecimal adminRate;
+        private BigDecimal operatorRate;
+        private java.time.LocalDate validFrom;
+        private java.time.LocalDate validTo;
+        private Boolean active;
+        private Integer priority;
+    }
+
+    @Data @Builder
+    public static class CommissionRuleResponse {
+        private Long id;
+        private String operatorCode;
+        private String operatorName;
+        private BigDecimal amountMin;
+        private BigDecimal amountMax;
+        private String calculationMode;
+        private BigDecimal ratePercent;
+        private BigDecimal commissionMin;
+        private BigDecimal commissionMax;
+        private BigDecimal distributorRate;
+        private BigDecimal adminRate;
+        private BigDecimal operatorRate;
+        private java.time.LocalDate validFrom;
+        private java.time.LocalDate validTo;
+        private boolean active;
+        private int priority;
     }
 }

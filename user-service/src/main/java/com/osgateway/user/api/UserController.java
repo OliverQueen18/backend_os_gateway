@@ -337,4 +337,32 @@ public class UserController {
         userService.deleteOperationType(id);
         return ApiResponse.ok("Deactivated", null);
     }
+
+    @GetMapping("/operation-types/{id}/operator-commissions")
+    @Operation(summary = "Commission rules for one operation type, per operator")
+    public ApiResponse<List<OperatorCommissionResponse>> listOperatorCommissions(@PathVariable Long id) {
+        return ApiResponse.ok(userService.listOperatorCommissions(id));
+    }
+
+    @PutMapping("/operation-types/{id}/operator-commissions")
+    @Operation(summary = "Replace per-operator commission rules (omitted operators use the type default)")
+    public ApiResponse<List<OperatorCommissionResponse>> replaceOperatorCommissions(
+            @PathVariable Long id,
+            @RequestBody List<OperatorCommissionRequest> requests) {
+        return ApiResponse.ok("Saved", userService.replaceOperatorCommissions(id, requests));
+    }
+
+    @GetMapping("/operation-types/{id}/commission-rules")
+    @Operation(summary = "Barème de commission (paliers) pour un type d'opération")
+    public ApiResponse<List<CommissionRuleResponse>> listCommissionRules(@PathVariable Long id) {
+        return ApiResponse.ok(userService.listCommissionRules(id));
+    }
+
+    @PutMapping("/operation-types/{id}/commission-rules")
+    @Operation(summary = "Remplace le barème de commission du type d'opération")
+    public ApiResponse<List<CommissionRuleResponse>> replaceCommissionRules(
+            @PathVariable Long id,
+            @RequestBody List<CommissionRuleRequest> requests) {
+        return ApiResponse.ok("Saved", userService.replaceCommissionRules(id, requests));
+    }
 }

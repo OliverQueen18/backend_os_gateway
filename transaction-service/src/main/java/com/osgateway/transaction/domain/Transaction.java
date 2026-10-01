@@ -35,6 +35,8 @@ public class Transaction extends AuditableEntity {
     private BigDecimal adminCommission;
     @Column(name = "distributor_commission", precision = 18, scale = 2)
     private BigDecimal distributorCommission;
+    @Column(name = "operator_commission", precision = 18, scale = 2)
+    private BigDecimal operatorCommission;
     @Column(name = "cancellation_reason_id")
     private Long cancellationReasonId;
     @Column(name = "cancellation_note", columnDefinition = "TEXT")

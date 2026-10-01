@@ -16,6 +16,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
+import java.time.LocalDate;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -766,7 +767,298 @@ public class UserService {
         List<OperationType> list = Boolean.TRUE.equals(activeOnly)
                 ? operationTypeRepository.findByActiveTrueOrderByLabelAsc()
                 : operationTypeRepository.findAllByOrderByLabelAsc();
-        return list.stream().map(this::toOperationType).toList();
+        Map<Long, List<OperatorCommissionResponse>> commissions = loadOperatorCommissions();
+        Map<Long, List<CommissionRuleResponse>> rules = loadCommissionRules();
+        return list.stream()
+                .map(t -> toOperationType(
+                        t,
+                        commissions.getOrDefault(t.getId(), List.of()),
+                        rules.getOrDefault(t.getId(), List.of())))
+                .toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<OperatorCommissionResponse> listOperatorCommissions(Long operationTypeId) {
+        if (!operationTypeRepository.existsById(operationTypeId)) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "Operation type not found");
+        }
+        return loadOperatorCommissions().getOrDefault(operationTypeId, List.of());
+    }
+
+    @Transactional
+    public List<OperatorCommissionResponse> replaceOperatorCommissions(
+            Long operationTypeId, List<OperatorCommissionRequest> requests) {
+        OperationType type = operationTypeRepository.findById(operationTypeId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "Operation type not found"));
+        List<OperatorCommissionRequest> rows = requests != null ? requests : List.of();
+        jdbcTemplate.update(
+                "DELETE FROM operation_operator_commissions WHERE operation_type_id = ?",
+                type.getId());
+        for (OperatorCommissionRequest request : rows) {
+            if (request == null || request.getOperatorCode() == null || request.getOperatorCode().isBlank()) {
+                throw new BusinessException(ErrorCode.VALIDATION_ERROR, "operatorCode is required");
+            }
+            String operatorCode = request.getOperatorCode().trim().toUpperCase(Locale.ROOT);
+            List<Long> operatorIds = jdbcTemplate.query(
+                    "SELECT id FROM operators WHERE UPPER(code) = ?",
+                    (rs, rowNum) -> rs.getLong(1),
+                    operatorCode);
+            if (operatorIds.isEmpty()) {
+                throw new BusinessException(ErrorCode.NOT_FOUND, "Opérateur introuvable : " + operatorCode);
+            }
+            CommissionConfig commission = resolveCommissionConfig(
+                    request.getCommissionMode(),
+                    request.getCommissionValue(),
+                    request.getAdminSharePercent(),
+                    request.getDistributorSharePercent());
+            jdbcTemplate.update(
+                    """
+                    INSERT INTO operation_operator_commissions (
+                        operation_type_id, operator_id, commission_mode, commission_value,
+                        admin_share_percent, distributor_share_percent, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, NOW())
+                    """,
+                    type.getId(),
+                    operatorIds.getFirst(),
+                    commission.mode(),
+                    commission.value(),
+                    commission.adminShare(),
+                    commission.distributorShare());
+        }
+        return listOperatorCommissions(type.getId());
+    }
+
+    private Map<Long, List<OperatorCommissionResponse>> loadOperatorCommissions() {
+        List<Map<String, Object>> rows;
+        try {
+            rows = jdbcTemplate.queryForList(
+                """
+                SELECT c.operation_type_id AS operation_type_id,
+                       o.code AS operator_code,
+                       o.name AS operator_name,
+                       c.commission_mode AS commission_mode,
+                       c.commission_value AS commission_value,
+                       c.admin_share_percent AS admin_share_percent,
+                       c.distributor_share_percent AS distributor_share_percent
+                FROM operation_operator_commissions c
+                JOIN operators o ON o.id = c.operator_id
+                ORDER BY o.name
+                """);
+        } catch (org.springframework.dao.DataAccessException ex) {
+            return Map.of();
+        }
+        Map<Long, List<OperatorCommissionResponse>> grouped = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            Long typeId = ((Number) row.get("operation_type_id")).longValue();
+            OperatorCommissionResponse item = OperatorCommissionResponse.builder()
+                    .operatorCode(String.valueOf(row.get("operator_code")))
+                    .operatorName(row.get("operator_name") != null ? String.valueOf(row.get("operator_name")) : null)
+                    .commissionMode(String.valueOf(row.get("commission_mode")))
+                    .commissionValue(toBigDecimal(row.get("commission_value")))
+                    .adminSharePercent(toBigDecimal(row.get("admin_share_percent")))
+                    .distributorSharePercent(toBigDecimal(row.get("distributor_share_percent")))
+                    .build();
+            grouped.computeIfAbsent(typeId, ignored -> new java.util.ArrayList<>()).add(item);
+        }
+        return grouped;
+    }
+
+    @Transactional(readOnly = true)
+    public List<CommissionRuleResponse> listCommissionRules(Long operationTypeId) {
+        if (!operationTypeRepository.existsById(operationTypeId)) {
+            throw new BusinessException(ErrorCode.NOT_FOUND, "Operation type not found");
+        }
+        return loadCommissionRules().getOrDefault(operationTypeId, List.of());
+    }
+
+    @Transactional
+    public List<CommissionRuleResponse> replaceCommissionRules(
+            Long operationTypeId, List<CommissionRuleRequest> requests) {
+        OperationType type = operationTypeRepository.findById(operationTypeId)
+                .orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "Operation type not found"));
+        List<CommissionRuleRequest> rows = requests != null ? requests : List.of();
+        try {
+            jdbcTemplate.update("DELETE FROM commission_rules WHERE operation_type_id = ?", type.getId());
+        } catch (org.springframework.dao.DataAccessException ex) {
+            throw new BusinessException(
+                    ErrorCode.VALIDATION_ERROR,
+                    "La table commission_rules est absente. Exécutez sql/37_commission_rules.sql");
+        }
+        for (CommissionRuleRequest request : rows) {
+            if (request == null || request.getOperatorCode() == null || request.getOperatorCode().isBlank()) {
+                throw new BusinessException(ErrorCode.VALIDATION_ERROR, "operatorCode is required");
+            }
+            String mode = request.getCalculationMode() != null
+                    ? request.getCalculationMode().trim().toUpperCase(Locale.ROOT)
+                    : "";
+            if (!"BASE_THEN_SPLIT".equals(mode) && !"DIRECT_ON_AMOUNT".equals(mode)) {
+                throw new BusinessException(
+                        ErrorCode.VALIDATION_ERROR,
+                        "calculationMode doit être BASE_THEN_SPLIT ou DIRECT_ON_AMOUNT");
+            }
+            BigDecimal amountMin = request.getAmountMin() != null ? request.getAmountMin() : BigDecimal.ZERO;
+            BigDecimal amountMax = request.getAmountMax();
+            if (amountMin.compareTo(BigDecimal.ZERO) < 0) {
+                throw new BusinessException(ErrorCode.VALIDATION_ERROR, "amountMin doit être positif ou nul");
+            }
+            if (amountMax != null && amountMax.compareTo(amountMin) < 0) {
+                throw new BusinessException(ErrorCode.VALIDATION_ERROR, "amountMax doit être supérieur ou égal à amountMin");
+            }
+            BigDecimal ratePercent = nonNegativeOrNull(request.getRatePercent(), "ratePercent");
+            if ("BASE_THEN_SPLIT".equals(mode) && ratePercent == null) {
+                throw new BusinessException(ErrorCode.VALIDATION_ERROR, "ratePercent est obligatoire pour un retrait");
+            }
+            BigDecimal commissionMin = nonNegativeOrNull(request.getCommissionMin(), "commissionMin");
+            BigDecimal commissionMax = nonNegativeOrNull(request.getCommissionMax(), "commissionMax");
+            if (commissionMin != null && commissionMax != null && commissionMax.compareTo(commissionMin) < 0) {
+                throw new BusinessException(
+                        ErrorCode.VALIDATION_ERROR, "commissionMax doit être supérieur ou égal à commissionMin");
+            }
+            BigDecimal distributorRate = requireNonNegative(request.getDistributorRate(), "distributorRate");
+            BigDecimal adminRate = requireNonNegative(request.getAdminRate(), "adminRate");
+            BigDecimal operatorRate = nonNegativeOrNull(request.getOperatorRate(), "operatorRate");
+            LocalDate validFrom = request.getValidFrom();
+            LocalDate validTo = request.getValidTo();
+            if (validFrom != null && validTo != null && validTo.isBefore(validFrom)) {
+                throw new BusinessException(ErrorCode.VALIDATION_ERROR, "validTo doit être postérieure ou égale à validFrom");
+            }
+            String operatorCode = request.getOperatorCode().trim().toUpperCase(Locale.ROOT);
+            List<Long> operatorIds = jdbcTemplate.query(
+                    "SELECT id FROM operators WHERE UPPER(code) = ?",
+                    (rs, rowNum) -> rs.getLong(1),
+                    operatorCode);
+            if (operatorIds.isEmpty()) {
+                throw new BusinessException(ErrorCode.NOT_FOUND, "Opérateur introuvable : " + operatorCode);
+            }
+            boolean active = request.getActive() == null || request.getActive();
+            int priority = request.getPriority() != null ? request.getPriority() : 0;
+            jdbcTemplate.update(
+                    """
+                    INSERT INTO commission_rules (
+                        operation_type_id, operator_id, amount_min, amount_max, calculation_mode,
+                        rate_percent, commission_min, commission_max,
+                        distributor_rate, admin_rate, operator_rate,
+                        valid_from, valid_to, active, priority, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+                    """,
+                    type.getId(),
+                    operatorIds.getFirst(),
+                    amountMin,
+                    amountMax,
+                    mode,
+                    ratePercent,
+                    commissionMin,
+                    commissionMax,
+                    distributorRate,
+                    adminRate,
+                    operatorRate,
+                    validFrom,
+                    validTo,
+                    active,
+                    priority);
+        }
+        return listCommissionRules(type.getId());
+    }
+
+    private Map<Long, List<CommissionRuleResponse>> loadCommissionRules() {
+        List<Map<String, Object>> rows;
+        try {
+            rows = jdbcTemplate.queryForList(
+                    """
+                    SELECT r.id AS id,
+                           r.operation_type_id AS operation_type_id,
+                           o.code AS operator_code,
+                           o.name AS operator_name,
+                           r.amount_min AS amount_min,
+                           r.amount_max AS amount_max,
+                           r.calculation_mode AS calculation_mode,
+                           r.rate_percent AS rate_percent,
+                           r.commission_min AS commission_min,
+                           r.commission_max AS commission_max,
+                           r.distributor_rate AS distributor_rate,
+                           r.admin_rate AS admin_rate,
+                           r.operator_rate AS operator_rate,
+                           r.valid_from AS valid_from,
+                           r.valid_to AS valid_to,
+                           r.active AS active,
+                           r.priority AS priority
+                    FROM commission_rules r
+                    JOIN operators o ON o.id = r.operator_id
+                    ORDER BY o.name, r.amount_min, r.priority DESC
+                    """);
+        } catch (org.springframework.dao.DataAccessException ex) {
+            return Map.of();
+        }
+        Map<Long, List<CommissionRuleResponse>> grouped = new java.util.LinkedHashMap<>();
+        for (Map<String, Object> row : rows) {
+            Long typeId = ((Number) row.get("operation_type_id")).longValue();
+            CommissionRuleResponse item = CommissionRuleResponse.builder()
+                    .id(((Number) row.get("id")).longValue())
+                    .operatorCode(String.valueOf(row.get("operator_code")))
+                    .operatorName(row.get("operator_name") != null ? String.valueOf(row.get("operator_name")) : null)
+                    .amountMin(toNullableDecimal(row.get("amount_min")))
+                    .amountMax(toNullableDecimal(row.get("amount_max")))
+                    .calculationMode(String.valueOf(row.get("calculation_mode")))
+                    .ratePercent(toNullableDecimal(row.get("rate_percent")))
+                    .commissionMin(toNullableDecimal(row.get("commission_min")))
+                    .commissionMax(toNullableDecimal(row.get("commission_max")))
+                    .distributorRate(toNullableDecimal(row.get("distributor_rate")))
+                    .adminRate(toNullableDecimal(row.get("admin_rate")))
+                    .operatorRate(toNullableDecimal(row.get("operator_rate")))
+                    .validFrom(toLocalDate(row.get("valid_from")))
+                    .validTo(toLocalDate(row.get("valid_to")))
+                    .active(toBoolean(row.get("active")))
+                    .priority(row.get("priority") instanceof Number number ? number.intValue() : 0)
+                    .build();
+            grouped.computeIfAbsent(typeId, ignored -> new java.util.ArrayList<>()).add(item);
+        }
+        return grouped;
+    }
+
+    private BigDecimal requireNonNegative(BigDecimal value, String field) {
+        if (value == null || value.compareTo(BigDecimal.ZERO) < 0) {
+            throw new BusinessException(ErrorCode.VALIDATION_ERROR, field + " doit être positif ou nul");
+        }
+        return value;
+    }
+
+    private BigDecimal nonNegativeOrNull(BigDecimal value, String field) {
+        if (value == null) {
+            return null;
+        }
+        if (value.compareTo(BigDecimal.ZERO) < 0) {
+            throw new BusinessException(ErrorCode.VALIDATION_ERROR, field + " doit être positif ou nul");
+        }
+        return value;
+    }
+
+    private BigDecimal toNullableDecimal(Object value) {
+        if (value == null) return null;
+        if (value instanceof BigDecimal decimal) return decimal;
+        return new BigDecimal(value.toString());
+    }
+
+    private boolean toBoolean(Object value) {
+        if (value instanceof Boolean flag) return flag;
+        if (value instanceof Number number) return number.intValue() != 0;
+        if (value == null) return false;
+        String text = value.toString();
+        return "true".equalsIgnoreCase(text) || "t".equalsIgnoreCase(text) || "1".equals(text);
+    }
+
+    private LocalDate toLocalDate(Object value) {
+        if (value == null) return null;
+        if (value instanceof LocalDate date) return date;
+        if (value instanceof java.sql.Date date) return date.toLocalDate();
+        if (value instanceof java.sql.Timestamp timestamp) return timestamp.toLocalDateTime().toLocalDate();
+        String text = value.toString();
+        return text.length() >= 10 ? LocalDate.parse(text.substring(0, 10)) : null;
+    }
+
+    private BigDecimal toBigDecimal(Object value) {
+        if (value == null) return BigDecimal.ZERO;
+        if (value instanceof BigDecimal decimal) return decimal;
+        return new BigDecimal(value.toString());
     }
 
     @Transactional
@@ -796,7 +1088,7 @@ public class UserService {
                 .requiresAmount(request.getRequiresAmount() == null || request.getRequiresAmount())
                 .build();
         type.setCreatedBy("admin");
-        return toOperationType(operationTypeRepository.save(type));
+        return toOperationType(operationTypeRepository.save(type), List.of(), List.of());
     }
 
     @Transactional
@@ -835,7 +1127,9 @@ public class UserService {
             }
             type.setCode(code);
         }
-        return toOperationType(operationTypeRepository.save(type));
+        OperationType saved = operationTypeRepository.save(type);
+        return toOperationType(
+                saved, listOperatorCommissions(saved.getId()), listCommissionRules(saved.getId()));
     }
 
     private CreatedDistributorUser createDistributorUser(DistributorRequest request, String password) {
@@ -1079,7 +1373,10 @@ public class UserService {
                 .build();
     }
 
-    private OperationTypeResponse toOperationType(OperationType t) {
+    private OperationTypeResponse toOperationType(
+            OperationType t,
+            List<OperatorCommissionResponse> commissions,
+            List<CommissionRuleResponse> rules) {
         return OperationTypeResponse.builder()
                 .id(t.getId())
                 .code(t.getCode())
@@ -1096,6 +1393,8 @@ public class UserService {
                 .cancellable(t.isCancellable())
                 .requiresPhone(t.isRequiresPhone())
                 .requiresAmount(t.isRequiresAmount())
+                .operatorCommissions(commissions != null ? commissions : List.of())
+                .commissionRules(rules != null ? rules : List.of())
                 .build();
     }
 }

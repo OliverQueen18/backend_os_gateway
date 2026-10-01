@@ -156,6 +156,62 @@ CREATE TABLE IF NOT EXISTS operation_types (
     created_by      VARCHAR(100)
 );
 
+-- Commission propre à un couple type d'opération + opérateur.
+-- Absent = le type d'opération fournit le mode, la valeur et les parts.
+CREATE TABLE IF NOT EXISTS operation_operator_commissions (
+    id              BIGSERIAL PRIMARY KEY,
+    operation_type_id BIGINT NOT NULL REFERENCES operation_types(id) ON DELETE CASCADE,
+    operator_id     BIGINT NOT NULL REFERENCES operators(id),
+    commission_mode VARCHAR(20) NOT NULL DEFAULT 'PERCENT'
+                    CHECK (commission_mode IN ('PERCENT','FIXED')),
+    commission_value NUMERIC(18,4) NOT NULL DEFAULT 1.50,
+    admin_share_percent NUMERIC(5,2) NOT NULL DEFAULT 40.00,
+    distributor_share_percent NUMERIC(5,2) NOT NULL DEFAULT 60.00,
+    CHECK (
+        admin_share_percent >= 0
+        AND distributor_share_percent >= 0
+        AND admin_share_percent + distributor_share_percent = 100
+    ),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ,
+    UNIQUE (operation_type_id, operator_id)
+);
+
+-- Barème par palier de montant, opérateur et type d'opération.
+-- BASE_THEN_SPLIT : base = MIN(MAX(montant × rate_percent, commission_min), commission_max).
+-- DIRECT_ON_AMOUNT : chaque taux s'applique au montant de la transaction.
+CREATE TABLE IF NOT EXISTS commission_rules (
+    id                  BIGSERIAL PRIMARY KEY,
+    operation_type_id   BIGINT NOT NULL REFERENCES operation_types(id) ON DELETE CASCADE,
+    operator_id         BIGINT NOT NULL REFERENCES operators(id),
+    amount_min          NUMERIC(18,2) NOT NULL DEFAULT 0,
+    amount_max          NUMERIC(18,2),
+    calculation_mode    VARCHAR(30) NOT NULL
+                        CHECK (calculation_mode IN ('BASE_THEN_SPLIT', 'DIRECT_ON_AMOUNT')),
+    rate_percent        NUMERIC(18,4),
+    commission_min      NUMERIC(18,2),
+    commission_max      NUMERIC(18,2),
+    distributor_rate    NUMERIC(18,4) NOT NULL,
+    admin_rate          NUMERIC(18,4) NOT NULL,
+    operator_rate       NUMERIC(18,4),
+    valid_from          DATE,
+    valid_to            DATE,
+    active              BOOLEAN NOT NULL DEFAULT TRUE,
+    priority            INTEGER NOT NULL DEFAULT 0,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at          TIMESTAMPTZ,
+    CHECK (amount_min >= 0),
+    CHECK (amount_max IS NULL OR amount_max >= amount_min),
+    CHECK (commission_min IS NULL OR commission_min >= 0),
+    CHECK (commission_max IS NULL OR commission_max >= 0),
+    CHECK (distributor_rate >= 0 AND admin_rate >= 0),
+    CHECK (operator_rate IS NULL OR operator_rate >= 0),
+    CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from)
+);
+
+CREATE INDEX IF NOT EXISTS idx_commission_rules_lookup
+    ON commission_rules (operation_type_id, operator_id, active);
+
 CREATE TABLE IF NOT EXISTS cancellation_reasons (
     id          BIGSERIAL PRIMARY KEY,
     code        VARCHAR(40) NOT NULL UNIQUE,
@@ -257,6 +313,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     commission          NUMERIC(18,2),
     admin_commission    NUMERIC(18,2),
     distributor_commission NUMERIC(18,2),
+    operator_commission NUMERIC(18,2),
     status              VARCHAR(30) NOT NULL CHECK (status IN ('PENDING','QUEUED','ASSIGNED','PROCESSING','WAITING_SMS_CONFIRMATION','SUCCESS','FAILED','CANCELLED','TIMEOUT')),
     priority            VARCHAR(20) NOT NULL CHECK (priority IN ('URGENT','NORMAL','BASSE')),
     ussd_response       TEXT,

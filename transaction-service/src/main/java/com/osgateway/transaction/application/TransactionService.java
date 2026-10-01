@@ -46,7 +46,9 @@ public class TransactionService {
             throw new BusinessException(ErrorCode.VALIDATION_ERROR, "type is required");
         }
         String typeCode = request.getType().trim().toUpperCase(Locale.ROOT);
-        OperationTypeConfig config = resolveOperationTypeConfig(typeCode);
+        String operatorCode = request.getOperator() != null ? request.getOperator().trim() : "";
+        OperationTypeConfig config = withOperatorCommission(
+                resolveOperationTypeConfig(typeCode), typeCode, operatorCode);
 
         Long distributorId = request.getDistributorId();
         if (distributorId == null && request.getUserId() != null) {
@@ -72,7 +74,7 @@ public class TransactionService {
         } else if (amount == null || amount.compareTo(BigDecimal.ZERO) < 0) {
             amount = BigDecimal.ZERO;
         }
-        CommissionSplit split = computeCommission(amount, config);
+        CommissionSplit split = computeCommission(amount, config, typeCode, operatorCode);
 
         // Solde UV : vérif. indicative à la création ; débit uniquement à SUCCESS (montant hors commission)
         if (distributorId != null && "DEBIT".equals(config.balanceEffect())) {
@@ -90,6 +92,7 @@ public class TransactionService {
                 .commission(split.total())
                 .adminCommission(split.admin())
                 .distributorCommission(split.distributor())
+                .operatorCommission(split.operator())
                 .status(TransactionStatus.PENDING)
                 .priority(priority)
                 .build();
@@ -470,12 +473,55 @@ public class TransactionService {
         return configs.getFirst();
     }
 
-    private CommissionSplit computeCommission(BigDecimal amount, OperationTypeConfig config) {
+    /** Surcharge mode, valeur et parts si une règle existe pour cet opérateur. */
+    private OperationTypeConfig withOperatorCommission(
+            OperationTypeConfig base, String typeCode, String operatorCode) {
+        if (operatorCode == null || operatorCode.isBlank()) {
+            return base;
+        }
+        try {
+            List<OperationTypeConfig> rows = jdbcTemplate.query(
+                    """
+                    SELECT c.commission_mode, c.commission_value,
+                           c.admin_share_percent, c.distributor_share_percent
+                    FROM operation_operator_commissions c
+                    JOIN operation_types ot ON ot.id = c.operation_type_id
+                    JOIN operators o ON o.id = c.operator_id
+                    WHERE UPPER(ot.code) = ? AND UPPER(o.code) = ?
+                    LIMIT 1
+                    """,
+                    (rs, rowNum) -> new OperationTypeConfig(
+                            base.balanceEffect(),
+                            rs.getString("commission_mode"),
+                            rs.getBigDecimal("commission_value"),
+                            rs.getBigDecimal("admin_share_percent"),
+                            rs.getBigDecimal("distributor_share_percent"),
+                            base.requiresPhone(),
+                            base.requiresAmount()),
+                    typeCode,
+                    operatorCode.trim().toUpperCase(Locale.ROOT));
+            return rows.isEmpty() ? base : rows.getFirst();
+        } catch (org.springframework.dao.DataAccessException ex) {
+            return base;
+        }
+    }
+
+    /**
+     * Barème actif (opérateur + type + palier + dates) en priorité.
+     * Sinon, commission du type, éventuellement surchargée par operation_operator_commissions.
+     */
+    private CommissionSplit computeCommission(
+            BigDecimal amount, OperationTypeConfig config, String typeCode, String operatorCode) {
+        BigDecimal base = amount != null ? amount : BigDecimal.ZERO;
+        CommissionCalculator.Rule rule = findCommissionRule(typeCode, operatorCode, base);
+        if (rule != null) {
+            CommissionCalculator.Split split = CommissionCalculator.apply(base, rule);
+            return new CommissionSplit(split.total(), split.admin(), split.distributor(), split.operatorShare());
+        }
         String mode = config.commissionMode() != null
                 ? config.commissionMode().trim().toUpperCase(Locale.ROOT)
                 : "PERCENT";
         BigDecimal value = config.commissionValue() != null ? config.commissionValue() : new BigDecimal("1.50");
-        BigDecimal base = amount != null ? amount : BigDecimal.ZERO;
         BigDecimal total;
         if ("FIXED".equals(mode)) {
             total = value.setScale(2, RoundingMode.HALF_UP);
@@ -491,7 +537,49 @@ public class TransactionService {
         BigDecimal admin = total.multiply(adminShare)
                 .divide(new BigDecimal("100"), 2, RoundingMode.HALF_UP);
         BigDecimal distributor = total.subtract(admin).setScale(2, RoundingMode.HALF_UP);
-        return new CommissionSplit(total, admin, distributor);
+        return new CommissionSplit(total, admin, distributor, BigDecimal.ZERO.setScale(2, RoundingMode.HALF_UP));
+    }
+
+    private CommissionCalculator.Rule findCommissionRule(String typeCode, String operatorCode, BigDecimal amount) {
+        if (typeCode == null || typeCode.isBlank() || operatorCode == null || operatorCode.isBlank()) {
+            return null;
+        }
+        try {
+            List<CommissionCalculator.Rule> rows = jdbcTemplate.query(
+                    """
+                    SELECT r.calculation_mode, r.rate_percent, r.commission_min, r.commission_max,
+                           r.distributor_rate, r.admin_rate, r.operator_rate
+                    FROM commission_rules r
+                    JOIN operation_types ot ON ot.id = r.operation_type_id
+                    JOIN operators o ON o.id = r.operator_id
+                    WHERE UPPER(ot.code) = ?
+                      AND UPPER(o.code) = ?
+                      AND r.active = TRUE
+                      AND ? >= r.amount_min
+                      AND (r.amount_max IS NULL OR ? <= r.amount_max)
+                      AND (r.valid_from IS NULL OR r.valid_from <= CURRENT_DATE)
+                      AND (r.valid_to IS NULL OR r.valid_to >= CURRENT_DATE)
+                    ORDER BY r.priority DESC,
+                             (COALESCE(r.amount_max, 1000000000000) - r.amount_min) ASC,
+                             r.id DESC
+                    LIMIT 1
+                    """,
+                    (rs, rowNum) -> new CommissionCalculator.Rule(
+                            rs.getString("calculation_mode"),
+                            rs.getBigDecimal("rate_percent"),
+                            rs.getBigDecimal("commission_min"),
+                            rs.getBigDecimal("commission_max"),
+                            rs.getBigDecimal("distributor_rate"),
+                            rs.getBigDecimal("admin_rate"),
+                            rs.getBigDecimal("operator_rate")),
+                    typeCode.trim().toUpperCase(Locale.ROOT),
+                    operatorCode.trim().toUpperCase(Locale.ROOT),
+                    amount,
+                    amount);
+            return rows.isEmpty() ? null : rows.getFirst();
+        } catch (org.springframework.dao.DataAccessException ex) {
+            return null;
+        }
     }
 
     private Long resolveDistributorIdByUser(Long userId) {
@@ -595,7 +683,8 @@ public class TransactionService {
             boolean requiresPhone,
             boolean requiresAmount) {}
 
-    private record CommissionSplit(BigDecimal total, BigDecimal admin, BigDecimal distributor) {}
+    private record CommissionSplit(
+            BigDecimal total, BigDecimal admin, BigDecimal distributor, BigDecimal operator) {}
 
     @Data
     public static class CreateRequest {
