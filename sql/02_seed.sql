@@ -188,7 +188,7 @@ INSERT INTO operation_types (
 
      'PERCENT', 1.50, 40.00, 60.00, TRUE, TRUE, TRUE, 'seed'),
 
-    ('RETRAIT', 'Retrait', 'Retrait Mobile Money client', 'pi pi-arrow-up', 'DEBIT',
+    ('RETRAIT', 'Retrait', 'Retrait Mobile Money client', 'pi pi-arrow-up', 'CREDIT',
 
      'PERCENT', 1.50, 40.00, 60.00, TRUE, TRUE, TRUE, 'seed'),
 

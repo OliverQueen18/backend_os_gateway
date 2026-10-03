@@ -38,7 +38,7 @@ ALTER TABLE ussd_templates DROP CONSTRAINT IF EXISTS ussd_templates_transaction_
 
 INSERT INTO operation_types (code, label, description, balance_effect, active, created_by) VALUES
     ('DEPOT', 'Dépôt', 'Dépôt Mobile Money client', 'DEBIT', TRUE, 'migrate'),
-    ('RETRAIT', 'Retrait', 'Retrait Mobile Money client', 'DEBIT', TRUE, 'migrate'),
+    ('RETRAIT', 'Retrait', 'Retrait Mobile Money client', 'CREDIT', TRUE, 'migrate'),
     ('TRANSFERT', 'Transfert', 'Transfert Mobile Money', 'DEBIT', TRUE, 'migrate'),
     ('SOLDE', 'Consultation solde', 'Consultation de solde', 'NONE', TRUE, 'migrate'),
     ('ACHAT_CREDIT', 'Achat crédit', 'Achat de crédit téléphonique', 'DEBIT', TRUE, 'migrate'),

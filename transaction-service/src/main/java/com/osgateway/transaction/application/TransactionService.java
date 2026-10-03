@@ -5,6 +5,7 @@ import com.osgateway.common.enums.Priority;
 import com.osgateway.common.enums.TransactionStatus;
 import com.osgateway.common.exception.BusinessException;
 import com.osgateway.common.exception.ErrorCode;
+import com.osgateway.common.util.UvBalanceEffect;
 import com.osgateway.common.messaging.QueueConstants;
 import com.osgateway.transaction.domain.CancellationReason;
 import com.osgateway.transaction.domain.Transaction;
@@ -76,8 +77,9 @@ public class TransactionService {
         }
         CommissionSplit split = computeCommission(amount, config, typeCode, operatorCode);
 
-        // Solde UV : vérif. indicative à la création ; débit uniquement à SUCCESS (montant hors commission)
-        if (distributorId != null && "DEBIT".equals(config.balanceEffect())) {
+        // Solde UV : vérif. indicative à la création ; mouvement uniquement à SUCCESS (montant hors commission)
+        String balanceEffect = UvBalanceEffect.resolve(typeCode, config.balanceEffect());
+        if (distributorId != null && "DEBIT".equals(balanceEffect)) {
             assertSufficientBalance(distributorId, amount);
         }
 
@@ -454,11 +456,7 @@ public class TransactionService {
                 ),
                 typeCode);
         if (configs.isEmpty()) {
-            String balanceEffect = switch (typeCode) {
-                case "SOLDE" -> "NONE";
-                case "ACHAT_UV" -> "CREDIT";
-                default -> "DEBIT";
-            };
+            String balanceEffect = UvBalanceEffect.resolve(typeCode, null);
             boolean requiresPhone = !"SOLDE".equals(typeCode) && !"ACHAT_UV".equals(typeCode);
             boolean requiresAmount = !"SOLDE".equals(typeCode);
             return new OperationTypeConfig(
@@ -619,15 +617,16 @@ public class TransactionService {
 
     /** Débit/crédit UV à SUCCESS uniquement — montant de la TX, jamais la commission. */
     private void applyBalanceOnSuccess(Transaction tx) {
-        String effect = resolveOperationTypeConfig(tx.getType()).balanceEffect();
+        OperationTypeConfig config = resolveOperationTypeConfig(tx.getType());
+        String effect = UvBalanceEffect.resolve(tx.getType(), config.balanceEffect());
         BigDecimal amount = tx.getAmount() != null ? tx.getAmount() : BigDecimal.ZERO;
-        if (amount.compareTo(BigDecimal.ZERO) <= 0) {
+        if (amount.compareTo(BigDecimal.ZERO) <= 0 || "NONE".equals(effect)) {
             return;
         }
-        if ("DEBIT".equals(effect)) {
-            debitDistributor(tx.getDistributorId(), amount);
-        } else if ("CREDIT".equals(effect)) {
+        if ("CREDIT".equals(effect)) {
             creditDistributor(tx.getDistributorId(), amount);
+        } else {
+            debitDistributor(tx.getDistributorId(), amount);
         }
     }
 

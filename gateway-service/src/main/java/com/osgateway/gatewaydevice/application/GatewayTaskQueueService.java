@@ -2,6 +2,7 @@ package com.osgateway.gatewaydevice.application;
 
 import com.osgateway.common.messaging.QueueConstants;
 import com.osgateway.common.util.PhoneNumbers;
+import com.osgateway.common.util.UvBalanceEffect;
 import com.osgateway.gatewaydevice.api.dto.GatewayTaskDtos.BalancePatternDto;
 import com.osgateway.gatewaydevice.api.dto.GatewayTaskDtos.GatewayTask;
 import com.osgateway.gatewaydevice.api.dto.GatewayTaskDtos.TaskResultRequest;
@@ -563,6 +564,9 @@ public class GatewayTaskQueueService {
                     lateSmsReopen
             );
             if (updated > 0 && ("SUCCESS".equals(status) || "FAILED".equals(status) || "TIMEOUT".equals(status))) {
+                if ("SUCCESS".equals(status)) {
+                    applyDistributorUvOnSuccess(txId);
+                }
                 notifyDistributorOnTerminalStatus(txId, status, confirmText);
             }
         } catch (Exception ex) {
@@ -591,6 +595,9 @@ public class GatewayTaskQueueService {
                         lateFallback
                 );
                 if (fallback > 0 && ("SUCCESS".equals(status) || "FAILED".equals(status) || "TIMEOUT".equals(status))) {
+                    if ("SUCCESS".equals(status)) {
+                        applyDistributorUvOnSuccess(txId);
+                    }
                     notifyDistributorOnTerminalStatus(txId, status, confirmText);
                 }
             } catch (Exception fallbackEx) {
@@ -661,6 +668,9 @@ public class GatewayTaskQueueService {
                         txId
                 );
                 if (updated > 0) {
+                    if ("SUCCESS".equals(finalStatus)) {
+                        applyDistributorUvOnSuccess(txId);
+                    }
                     log.info("Expired WAITING_SMS_CONFIRMATION tx {} -> {} (balanceConfirmed={})",
                             txId, finalStatus, balanceConfirmed);
                     String detail = "SUCCESS".equals(finalStatus)
@@ -959,6 +969,61 @@ public class GatewayTaskQueueService {
             );
         } catch (Exception ex) {
             return Map.of();
+        }
+    }
+
+    /**
+     * Mouvement UV distributeur au premier passage en SUCCESS.
+     * Montant de la transaction seul. Retrait et achat UV créditent, les envois débitent.
+     */
+    private void applyDistributorUvOnSuccess(Long txId) {
+        try {
+            List<Map<String, Object>> rows = jdbcTemplate.queryForList(
+                    """
+                    SELECT t.distributor_id, t.amount, t.type,
+                           ot.balance_effect
+                    FROM transactions t
+                    LEFT JOIN operation_types ot ON UPPER(ot.code) = UPPER(t.type)
+                    WHERE t.id = ?
+                    """,
+                    txId);
+            if (rows.isEmpty()) {
+                return;
+            }
+            Map<String, Object> row = rows.getFirst();
+            if (row.get("distributor_id") == null) {
+                return;
+            }
+            long distributorId = ((Number) row.get("distributor_id")).longValue();
+            BigDecimal amount = row.get("amount") != null
+                    ? new BigDecimal(row.get("amount").toString()) : BigDecimal.ZERO;
+            if (amount.signum() <= 0) {
+                return;
+            }
+            String typeCode = row.get("type") != null ? row.get("type").toString() : "";
+            String configured = row.get("balance_effect") != null ? row.get("balance_effect").toString() : "";
+            String effect = UvBalanceEffect.resolve(typeCode, configured);
+            int updated = switch (effect) {
+                case "CREDIT" -> jdbcTemplate.update(
+                        """
+                        UPDATE distributor_accounts
+                        SET balance = balance + ?, updated_at = NOW()
+                        WHERE id = ? AND active = TRUE
+                        """,
+                        amount, distributorId);
+                case "DEBIT" -> jdbcTemplate.update(
+                        """
+                        UPDATE distributor_accounts
+                        SET balance = balance - ?, updated_at = NOW()
+                        WHERE id = ? AND active = TRUE
+                        """,
+                        amount, distributorId);
+                default -> 0;
+            };
+            log.info("UV {} {} XOF distributor {} tx {} (rows={})",
+                    effect, amount.toPlainString(), distributorId, txId, updated);
+        } catch (Exception ex) {
+            log.error("UV movement failed for tx {}: {}", txId, ex.getMessage());
         }
     }
 
